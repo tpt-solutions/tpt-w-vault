@@ -1,0 +1,7 @@
+Local-First Encrypted Vault & Secure Notes (tpt-vault)
+The Problem: Cloud password managers are frequent breach targets. Local tools like VeraCrypt are too intimidating for non-technical users who just want to hide a folder of sensitive files.
+The TPT Solution: A modern, user-friendly encrypted container tool with Windows Hello/Linux biometric integration and a built-in secure markdown editor.
+
+Compatible on Windows, Linux and Archon. https://github.com/tpt-solutions/tpt-archon
+
+🐧 Linux & Archon Compatibility: Integrates with Linux Keyrings (GNOME/KDE) and uses FUSE for mounting. On Archon, it leverages tpt-archon-core's hardware-backed cryptographic primitives and the unified page cache. Vault data is stored encrypted at the block level, and decrypted on-the-fly in memory only when the UI presents a valid, unforgeable capability token to the kernel.

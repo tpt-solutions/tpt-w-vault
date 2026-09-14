@@ -1,0 +1,25 @@
+# Rust
+/target/
+**/target/
+
+# Node / Vite / Tauri frontend
+node_modules/
+dist/
+src-tauri/target/
+
+# Tauri build artifacts
+*.exe
+*.msi
+*.dmg
+*.deb
+*.rpm
+*.AppImage
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Claude Code local state
+.claude/
