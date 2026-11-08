@@ -30,6 +30,7 @@ mod file;
 mod fsvault;
 mod keys;
 mod names;
+mod platform;
 mod recovery;
 
 pub use backend::{EntryInfo, EntryKind, VaultBackend, VaultFile, copy_from_file, copy_into_file};
@@ -37,6 +38,9 @@ pub use config::{CONFIG_FILE_NAME, FORMAT_VERSION, KdfParams};
 pub use error::{Result, VaultError};
 pub use file::FileHandle;
 pub use fsvault::FsVault;
+pub use platform::{
+    ConsentGate, PLATFORM_KEY_LEN, PlatformKey, PlatformUnlock, Protector, SecretStore,
+};
 pub use recovery::RecoveryCode;
 
 /// Crate version, exposed so frontends and platform crates can report it.

@@ -3,10 +3,13 @@
 
 //! `vault.conf`: scrypt parameters and the wrapped master key.
 //!
-//! The file is JSON so it stays inspectable. The master key is wrapped twice, with AES-256-GCM:
+//! The file is JSON so it stays inspectable. The master key is wrapped with AES-256-GCM under
+//! one of three keys ("slots"):
 //!
-//! - under a scrypt-derived key from the passphrase (always present), and
-//! - under an HKDF-derived key from the recovery-code secret (present once a code is issued).
+//! - **passphrase** (always present): a scrypt-derived key from the passphrase.
+//! - **recovery** (once a code is issued): a key derived from the 256-bit recovery secret.
+//! - **platform** (once platform unlock is enabled): a key derived from a random 32-byte
+//!   platform key. The platform layer stores that key OS-protected, behind a consent gate.
 //!
 //! Changing the passphrase re-wraps the master key only; file contents are never touched.
 
@@ -34,10 +37,33 @@ const CONTENT_CIPHER: &str = "AES-256-GCM";
 const NAME_CIPHER: &str = "AES-256-SIV";
 const SALT_LEN: usize = 16;
 const NONCE_LEN: usize = 12;
-/// Bound to each wrap so one wrapped key cannot be substituted for the other.
+const VAULT_ID_LEN: usize = 16;
+
+/// The three ways the master key can be unwrapped, each with its own key-derivation label
+/// and associated data, so one wrap cannot be substituted for another.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Slot {
+    Recovery,
+    Platform,
+}
+
+impl Slot {
+    fn aad(self) -> &'static [u8] {
+        match self {
+            Slot::Recovery => b"tpt-vault:vault.conf:v1:recovery",
+            Slot::Platform => b"tpt-vault:vault.conf:v1:platform",
+        }
+    }
+
+    fn info(self) -> &'static [u8] {
+        match self {
+            Slot::Recovery => b"tpt-vault v1 recovery-code wrap",
+            Slot::Platform => b"tpt-vault v1 platform-key wrap",
+        }
+    }
+}
+
 const PASSPHRASE_AAD: &[u8] = b"tpt-vault:vault.conf:v1:passphrase";
-const RECOVERY_AAD: &[u8] = b"tpt-vault:vault.conf:v1:recovery";
-const RECOVERY_WRAP_INFO: &[u8] = b"tpt-vault v1 recovery-code wrap";
 
 /// scrypt cost parameters. `log_n` is log2 of the CPU/memory cost N.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,9 +92,9 @@ pub(crate) struct KdfConfig {
     pub salt: String,
 }
 
-/// The master key wrapped under the recovery-code secret.
+/// A master-key wrap stored in one of the optional slots.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub(crate) struct RecoveryWrap {
+pub(crate) struct SlotWrap {
     /// base64url (no padding) of `nonce || ciphertext || tag`.
     pub wrapped_master_key: String,
 }
@@ -77,6 +103,8 @@ pub(crate) struct RecoveryWrap {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct VaultConfig {
     pub format_version: u32,
+    /// Random identifier used to name this vault's platform-protected entries.
+    pub vault_id: String,
     pub kdf: KdfConfig,
     pub content_cipher: String,
     pub name_cipher: String,
@@ -84,7 +112,10 @@ pub(crate) struct VaultConfig {
     pub wrapped_master_key: String,
     /// Absent until a recovery code has been issued.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub recovery: Option<RecoveryWrap>,
+    pub recovery: Option<SlotWrap>,
+    /// Absent until platform unlock is enabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<SlotWrap>,
 }
 
 fn derive_passphrase_key(passphrase: &[u8], kdf: &KdfConfig) -> Result<[u8; MASTER_KEY_LEN]> {
@@ -99,10 +130,11 @@ fn derive_passphrase_key(passphrase: &[u8], kdf: &KdfConfig) -> Result<[u8; MAST
     Ok(out)
 }
 
-fn derive_recovery_key(secret: &[u8; 32]) -> [u8; MASTER_KEY_LEN] {
+/// Derives a slot's wrap key from a high-entropy secret (no scrypt needed).
+fn derive_slot_key(secret: &[u8; 32], slot: Slot) -> [u8; MASTER_KEY_LEN] {
     let mut out = [0u8; MASTER_KEY_LEN];
     Hkdf::<Sha256>::new(None, secret)
-        .expand(RECOVERY_WRAP_INFO, &mut out)
+        .expand(slot.info(), &mut out)
         .expect("HKDF expand: 32 bytes is within limits");
     out
 }
@@ -171,24 +203,28 @@ fn new_kdf(params: KdfParams) -> KdfConfig {
 }
 
 impl VaultConfig {
-    /// Creates a new config wrapping a freshly generated master key. No recovery wrap yet.
+    /// Creates a new config wrapping a freshly generated master key. Only the passphrase slot
+    /// is filled.
     pub(crate) fn create(passphrase: &[u8], params: KdfParams) -> Result<(Self, MasterKey)> {
         let master = MasterKey::generate();
         let kdf = new_kdf(params);
         let wrap_key = derive_passphrase_key(passphrase, &kdf)?;
+        let vault_id: [u8; VAULT_ID_LEN] = random_bytes();
         let config = VaultConfig {
             format_version: FORMAT_VERSION,
+            vault_id: URL_SAFE_NO_PAD.encode(vault_id),
             kdf,
             content_cipher: CONTENT_CIPHER.into(),
             name_cipher: NAME_CIPHER.into(),
             wrapped_master_key: wrap_master(wrap_key, PASSPHRASE_AAD, &master),
             recovery: None,
+            platform: None,
         };
         Ok((config, master))
     }
 
     /// Returns a copy protected by a new passphrase (new salt and cost), wrapping the same
-    /// master key. The recovery wrap, if any, is kept unchanged.
+    /// master key. Other slots are kept unchanged.
     pub(crate) fn with_new_passphrase(
         &self,
         master: &MasterKey,
@@ -204,12 +240,23 @@ impl VaultConfig {
         })
     }
 
-    /// Wraps the master key under a recovery secret, replacing any previous recovery wrap.
-    pub(crate) fn set_recovery(&mut self, master: &MasterKey, secret: &[u8; 32]) {
-        let wrap_key = derive_recovery_key(secret);
-        self.recovery = Some(RecoveryWrap {
-            wrapped_master_key: wrap_master(wrap_key, RECOVERY_AAD, master),
-        });
+    /// Wraps the master key under a slot secret, replacing any previous wrap in that slot.
+    pub(crate) fn set_slot(&mut self, slot: Slot, master: &MasterKey, secret: &[u8; 32]) {
+        let wrap = SlotWrap {
+            wrapped_master_key: wrap_master(derive_slot_key(secret, slot), slot.aad(), master),
+        };
+        match slot {
+            Slot::Recovery => self.recovery = Some(wrap),
+            Slot::Platform => self.platform = Some(wrap),
+        }
+    }
+
+    /// Removes a slot's wrap. Returns whether one was present.
+    pub(crate) fn clear_slot(&mut self, slot: Slot) -> bool {
+        match slot {
+            Slot::Recovery => self.recovery.take().is_some(),
+            Slot::Platform => self.platform.take().is_some(),
+        }
     }
 
     /// Checks version and algorithm fields. Called on every load and unlock.
@@ -234,13 +281,21 @@ impl VaultConfig {
             .ok_or(VaultError::WrongPassphrase)
     }
 
-    /// Recovers the master key from the recovery secret.
-    pub(crate) fn unlock_with_recovery(&self, secret: &[u8; 32]) -> Result<MasterKey> {
+    /// Recovers the master key from a slot secret. A missing slot reports the same error as a
+    /// wrong secret, so the two cannot be told apart from outside.
+    pub(crate) fn unlock_slot(&self, slot: Slot, secret: &[u8; 32]) -> Result<MasterKey> {
         self.validate()?;
-        let recovery = self.recovery.as_ref().ok_or(VaultError::WrongPassphrase)?;
-        let wrap_key = derive_recovery_key(secret);
-        unwrap_master(wrap_key, RECOVERY_AAD, &recovery.wrapped_master_key)?
-            .ok_or(VaultError::WrongPassphrase)
+        let wrap = match slot {
+            Slot::Recovery => self.recovery.as_ref(),
+            Slot::Platform => self.platform.as_ref(),
+        }
+        .ok_or(VaultError::WrongPassphrase)?;
+        unwrap_master(
+            derive_slot_key(secret, slot),
+            slot.aad(),
+            &wrap.wrapped_master_key,
+        )?
+        .ok_or(VaultError::WrongPassphrase)
     }
 
     /// Reads and validates `vault.conf` from `path`.

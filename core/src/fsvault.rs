@@ -30,11 +30,13 @@ use zeroize::{Zeroize, Zeroizing};
 use crate::backend::{
     EntryInfo, EntryKind, STREAM_CHUNK, VaultBackend, VaultFile, map_io, split_path,
 };
+use crate::config::Slot;
 use crate::config::{CONFIG_FILE_NAME, KdfParams, VaultConfig};
 use crate::error::{Result, VaultError};
 use crate::file::{FileHandle, plaintext_len_for_disk};
-use crate::keys::{DerivedKeys, MasterKey};
+use crate::keys::{DerivedKeys, MasterKey, random_bytes};
 use crate::names::{decrypt_segment, encrypt_segment};
+use crate::platform::PlatformKey;
 use crate::recovery::{self, RecoveryCode};
 
 /// Largest encrypted name that is stored directly as a filename.
@@ -67,7 +69,7 @@ impl FsVault {
         }
         let (mut config, master) = VaultConfig::create(passphrase, params)?;
         let (mut secret, code) = recovery::generate();
-        config.set_recovery(&master, &secret);
+        config.set_slot(Slot::Recovery, &master, &secret);
         secret.zeroize();
         config.save_atomic(&conf)?;
         Ok((Self::unlocked(root, master), code))
@@ -92,7 +94,7 @@ impl FsVault {
         let root = root.as_ref().to_path_buf();
         let mut secret = recovery::parse(code)?;
         let config = VaultConfig::load(&root.join(CONFIG_FILE_NAME))?;
-        let master = config.unlock_with_recovery(&secret);
+        let master = config.unlock_slot(Slot::Recovery, &secret);
         secret.zeroize();
         Ok(Self::unlocked(root, master?))
     }
@@ -121,7 +123,7 @@ impl FsVault {
         let mut config = VaultConfig::load(&path)?;
         let master = config.unlock(passphrase)?;
         let (mut secret, code) = recovery::generate();
-        config.set_recovery(&master, &secret);
+        config.set_slot(Slot::Recovery, &master, &secret);
         secret.zeroize();
         config.save_atomic(&path)?;
         Ok(code)
@@ -163,6 +165,49 @@ impl FsVault {
 
         let FsVault { master, keys, .. } = fresh;
         Ok((FsVault { root, master, keys }, code))
+    }
+
+    /// Reads a vault's id from `vault.conf` without unlocking it. The platform layer needs the
+    /// id to find the key it stores for this vault.
+    pub fn read_vault_id(root: impl AsRef<Path>) -> Result<String> {
+        Ok(VaultConfig::load(&root.as_ref().join(CONFIG_FILE_NAME))?.vault_id)
+    }
+
+    /// Enables platform unlock. Returns the random key that the platform layer must store
+    /// protected, behind a consent gate. The passphrase is required.
+    ///
+    /// Calling this again issues a new key and invalidates the previous one.
+    pub fn enable_platform_unlock(&self, passphrase: &[u8]) -> Result<PlatformKey> {
+        let path = self.config_path();
+        let mut config = VaultConfig::load(&path)?;
+        let master = config.unlock(passphrase)?;
+        let mut secret = random_bytes::<32>();
+        config.set_slot(Slot::Platform, &master, &secret);
+        let key = PlatformKey::from_bytes(secret);
+        secret.zeroize();
+        config.save_atomic(&path)?;
+        Ok(key)
+    }
+
+    /// Disables platform unlock for this vault. The passphrase is required. The caller should
+    /// also remove the stored key with [`PlatformUnlock::remove`], since the stored key no
+    /// longer unlocks anything.
+    pub fn disable_platform_unlock(&self, passphrase: &[u8]) -> Result<()> {
+        let path = self.config_path();
+        let mut config = VaultConfig::load(&path)?;
+        config.unlock(passphrase)?;
+        if config.clear_slot(Slot::Platform) {
+            config.save_atomic(&path)?;
+        }
+        Ok(())
+    }
+
+    /// Unlocks a vault with the platform key released by the platform layer.
+    pub fn open_with_platform_key(root: impl AsRef<Path>, key: &PlatformKey) -> Result<Self> {
+        let root = root.as_ref().to_path_buf();
+        let config = VaultConfig::load(&root.join(CONFIG_FILE_NAME))?;
+        let master = config.unlock_slot(Slot::Platform, key.as_bytes())?;
+        Ok(Self::unlocked(root, master))
     }
 
     /// Locks the vault. Dropping the session zeroizes the master key and derived keys.

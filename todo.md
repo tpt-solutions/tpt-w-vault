@@ -51,7 +51,7 @@ Decisions locked in for this roadmap:
 | 0  | Project Setup & Licensing                          | 🟡 In Progress (local items done) |
 | 1  | Core Vault Format & Crypto Engine                  | 🟡 In Progress (core implemented, tested) |
 | 2  | Key Management & Unlock Flows                      | 🟡 In Progress (re-key, mlock open) |
-| 3  | Windows Platform Integration                       | ❌ Not Started |
+| 3  | Windows Platform Integration                       | 🟡 In Progress (Hello prompt unverified by hand) |
 | 4  | Linux Platform Integration                         | ❌ Not Started |
 | 5  | Windows Mount Backend                              | ❌ Not Started |
 | 6  | Linux Mount Backend                                | ❌ Not Started |
@@ -129,11 +129,17 @@ Decisions locked in for this roadmap:
       observe memory after drop
 
 ## Phase 3 — Windows Platform Integration
-- [ ] Windows Hello gate via `Windows.Security.Credentials.UI.UserConsentVerifier`
-      (`RequestVerificationAsync`) protecting a CNG/DPAPI-wrapped key blob
-- [ ] Windows Credential Manager storage for the platform-wrapped key
-- [ ] Fallback path when Windows Hello is unavailable (passphrase-only unlock)
-- [ ] Unit/integration tests against a mockable Windows Hello/DPAPI boundary (CI-safe)
+- [~] Windows Hello gate via `UserConsentVerifier` (`platform-windows/src/hello.rs`).
+      Availability is confirmed on the dev machine. The prompt itself has not been approved by
+      a person yet. Protection is DPAPI, not CNG: DPAPI is user-bound and needs no key-store
+      setup, and it is what the roadmap's "CNG/DPAPI" line allows
+- [x] Windows Credential Manager storage for the platform-wrapped key (`credman.rs`), verified
+      live on the dev machine
+- [x] Fallback path when Windows Hello is unavailable: `VaultError::PlatformUnavailable`
+      from `PlatformUnlock`. Passphrase unlock is unaffected. UI wiring is Phase 9
+- [x] Unit/integration tests against a mockable boundary: the orchestration is tested with
+      fakes in `core/src/platform.rs`, and `core/tests/platform.rs` covers the vault-level flow.
+      Live DPAPI and Credential Manager round trips run in `platform-windows`
 
 ## Phase 4 — Linux Platform Integration
 - [ ] Secret Service client via `zbus` (D-Bus `org.freedesktop.secrets`) for storing the

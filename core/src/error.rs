@@ -23,6 +23,23 @@ pub enum VaultError {
     #[error("the recovery code is not valid; check it for typos")]
     InvalidRecoveryCode,
 
+    /// The platform layer cannot run a consent check on this device (e.g. Windows Hello is not
+    /// set up). Passphrase or recovery-code unlock still works.
+    #[error("platform unlock is not available on this device")]
+    PlatformUnavailable,
+
+    /// The user declined or cancelled the consent prompt.
+    #[error("the unlock request was cancelled or not approved")]
+    ConsentDenied,
+
+    /// No platform-protected key is stored for this vault on this device.
+    #[error("platform unlock is not set up for this vault on this device")]
+    PlatformNotEnrolled,
+
+    /// The platform layer failed for a reason other than the cases above.
+    #[error("platform unlock failed: {0}")]
+    Platform(String),
+
     /// `vault.conf` or an on-disk file declares a format version this build cannot read.
     #[error("unsupported vault format version {0}")]
     UnsupportedVersion(u32),
