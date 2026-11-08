@@ -48,9 +48,9 @@ Decisions locked in for this roadmap:
 
 | Phase | Area | Progress |
 |-------|------|----------|
-| 0  | Project Setup & Licensing                          | ❌ Not Started |
-| 1  | Core Vault Format & Crypto Engine                  | ❌ Not Started |
-| 2  | Key Management & Unlock Flows                      | ❌ Not Started |
+| 0  | Project Setup & Licensing                          | 🟡 In Progress (local items done) |
+| 1  | Core Vault Format & Crypto Engine                  | 🟡 In Progress (core implemented, tested) |
+| 2  | Key Management & Unlock Flows                      | 🟡 In Progress (re-key, mlock open) |
 | 3  | Windows Platform Integration                       | ❌ Not Started |
 | 4  | Linux Platform Integration                         | ❌ Not Started |
 | 5  | Windows Mount Backend                              | ❌ Not Started |
@@ -66,46 +66,64 @@ Decisions locked in for this roadmap:
 ---
 
 ## Phase 0 — Project Setup & Licensing
-- [ ] Init git repo, `.gitignore` (Rust + Node/Tauri targets + Windows/Linux build artifacts)
-- [ ] Add `LICENSE-MIT` and `LICENSE-APACHE` (dual license, TPT Solutions copyright)
-- [ ] Add SPDX dual-license header/notice convention for source files
-- [ ] Cargo workspace: `core/` (vault format, crypto engine, key management, `VaultBackend`
-      trait), `platform-windows/`, `platform-linux/`, `platform-archon/`, `src-tauri/`, `src/`
-      (TS/HTML frontend, Vite); shared `[workspace.package]` (`license`, `authors = ["TPT
-      Solutions"]`, `repository`)
-- [ ] `rust-toolchain.toml` (MSRV pin), `rustfmt.toml`, `clippy.toml`
-- [ ] Configure `tauri.conf.json` (app id, window defaults, bundle identifiers)
-- [ ] TypeScript config (tsconfig, Vite, no framework)
-- [ ] `README.md` (from spec.txt), build instructions, license badges
-- [ ] Set up CI (GitHub Actions, build+lint+test on Windows + Linux runners)
+- [x] Init git repo, `.gitignore` (Rust + Node/Tauri targets + Windows/Linux build artifacts)
+- [x] Add `LICENSE-MIT` and `LICENSE-APACHE` (dual license, TPT Solutions copyright)
+- [x] Add SPDX dual-license header/notice convention for source files (see `CONTRIBUTING.md`)
+- [~] Cargo workspace: `core/`, `platform-windows/`, `platform-linux/`, `platform-archon/` done
+      (skeleton crates); `src/` (Vite) done; `src-tauri/` deferred to Phase 8; shared
+      `[workspace.package]` done
+- [x] `rust-toolchain.toml` (MSRV pin), `rustfmt.toml`, `clippy.toml`
+- [ ] Configure `tauri.conf.json` (app id, window defaults, bundle identifiers) — Phase 8
+- [x] TypeScript config (tsconfig, Vite, no framework)
+- [x] `README.md` (from spec.txt), build instructions (license badges still to add)
+- [x] Set up CI (GitHub Actions, build+lint+test on Windows + Linux runners) — workflow file
+      added at `.github/workflows/ci.yml`; not yet run on GitHub
 - [ ] Repo hosting under `tpt-solutions` GitHub org
 
 ## Phase 1 — Core Vault Format & Crypto Engine
-- [ ] `vault.conf`-style config file format: scrypt KDF parameters, wrapped master key
-      (AES-256-GCM), vault format version
-- [ ] Per-file content encryption: fixed 4 KiB block size, AES-256-GCM per block with inline
+- [x] `vault.conf`-style config file format: scrypt KDF parameters, wrapped master key
+      (AES-256-GCM), vault format version (`core/src/config.rs`)
+- [x] Per-file content encryption: fixed 4 KiB block size, AES-256-GCM per block with inline
       nonce+tag, streaming encrypt/decrypt so large files never load fully into memory
-- [ ] Filename encryption: AES-SIV (EME mode) over path segments, base64url-safe encoding for
-      on-disk names
-- [ ] Directory structure mapping: encrypted vault tree mirrors plaintext tree shape (encrypted
-      names), directory IV/metadata handling
-- [ ] Shared `trait VaultBackend` (open/create vault, read/write/list/rename/delete entries,
-      streaming file handles) so mount backends (Phase 5/6) and Archon (Phase 10) share one
-      interface
-- [ ] Integrity: per-block GCM tag verification on read, corrupt-block error surfaced distinctly
-      from "wrong key"
-- [ ] Core unit tests: round-trip encrypt/decrypt, tamper detection, large-file streaming,
-      filename encryption collisions
+      (`core/src/file.rs`, `core/src/block.rs`)
+- [x] Filename encryption: AES-SIV over path segments, base64url-safe encoding for on-disk
+      names. Deviation: AES-SIV in the `aes-siv` crate is SIV (RFC 5297), not EME mode.
+      Names over 175 bytes are rejected (no long-name files yet)
+- [x] Directory structure mapping: encrypted vault tree mirrors plaintext tree shape.
+      Decision: no per-directory IV file. SIV is deterministic and each segment is encrypted
+      independently, so renames and moves need no re-encryption. Trade-off: equal names in
+      different directories produce equal encrypted segments
+- [x] Shared `trait VaultBackend` (create/list/stat/rename/remove, random-access `VaultFile`
+      handles, streaming copy helpers) (`core/src/backend.rs`)
+- [x] Integrity: per-block GCM tag verification on read, corrupt-block error surfaced distinctly
+      from "wrong key" (`VaultError::Corrupt` vs `VaultError::WrongPassphrase`). Block AAD binds
+      file id, block index and last-block flag, so reordering and truncation are detected
+- [x] Core unit tests: round-trip encrypt/decrypt, tamper detection, large-file streaming,
+      filename encryption collisions (`core/tests/vault.rs`, 22 integration tests)
+- [ ] Long filenames (>175 bytes plaintext): add hashed long-name files so they are not refused
+- [ ] Nonce budget: content nonces are random 96-bit per block write; define a per-key write
+      limit (or key rotation) well below the ~2^32 birthday bound
+- [ ] Crash consistency: a multi-block `write_at` that crashes midway can leave mixed old/new
+      blocks. Each block authenticates, but the set may not be a consistent state. Covered by
+      the Phase 12 data-loss test; consider a write-ahead journal
+- [ ] Zeroize plaintext buffers in the read/write paths (currently plain `Vec<u8>`)
 
 ## Phase 2 — Key Management & Unlock Flows
-- [ ] Master key generation (CSPRNG), lifecycle: create vault, unlock, lock, re-key
-- [ ] Passphrase-based unlock: scrypt-derive a wrapping key from passphrase, unwrap master key
-- [ ] Passphrase change: re-wrap master key without touching file contents
-- [ ] Recovery key / paper backup: generate a human-writable recovery code that can unwrap the
-      master key independent of passphrase or platform unlock method
-- [ ] Session key handling: master key held only in locked/zeroized memory (`zeroize` crate) while
-      vault is mounted, cleared on lock/app exit
-- [ ] Unit tests: passphrase change round-trip, recovery key round-trip, memory zeroization checks
+- [x] Master key generation (CSPRNG), lifecycle: create vault, unlock, lock
+- [ ] Re-key: rotate the master key itself. Not implemented. It requires re-encrypting every
+      file's contents, so it needs a dedicated migration step (deferred)
+- [x] Passphrase-based unlock: scrypt-derive a wrapping key from passphrase, unwrap master key
+- [x] Passphrase change: re-wrap master key without touching file contents (verified byte-for-byte
+      in `core/tests/keys.rs`)
+- [x] Recovery key / paper backup: 256-bit secret shown as 55 Crockford base32 characters with a
+      checksum (`core/src/recovery.rs`). Wraps the master key via HKDF, independent of the
+      passphrase. Rotatable with `rotate_recovery_code`
+- [~] Session key handling: the master key and subkeys are zeroized on drop, and `lock()` ends
+      the session. Not done: page locking (mlock/VirtualLock) to keep keys out of swap, and
+      zeroizing transient plaintext buffers (tracked under Phase 1)
+- [x] Unit tests: passphrase change round-trip, recovery key round-trip (`core/tests/keys.rs`),
+      wipe check (`keys.rs`). The wipe test calls the same zeroize as Drop, but it does not
+      observe memory after drop
 
 ## Phase 3 — Windows Platform Integration
 - [ ] Windows Hello gate via `Windows.Security.Credentials.UI.UserConsentVerifier`

@@ -3,7 +3,41 @@
 
 //! tpt-vault core: vault format, crypto engine, key management.
 //!
-//! Phase 0 skeleton. The `VaultBackend` trait and crypto engine land in Phase 1.
+//! Layout of a vault on disk, and the rules behind it, are documented in [`file`] (content)
+//! and [`names`] (filenames). Keys live in `keys`. The storage interface that every backend
+//! implements is [`backend::VaultBackend`]; the local-directory implementation is [`FsVault`].
+//!
+//! # Example
+//!
+//! ```no_run
+//! use tpt_vault_core::{FsVault, KdfParams, VaultBackend, VaultFile};
+//!
+//! let (vault, recovery_code) =
+//!     FsVault::create("my-vault", b"correct horse", KdfParams::RECOMMENDED)?;
+//! // Show `recovery_code` to the user once, and keep it somewhere safe.
+//! println!("Recovery code: {recovery_code}");
+//! vault.create_dir("notes")?;
+//! let mut f = vault.create_file("notes/todo.md")?;
+//! f.write_at(0, b"# Todo\n")?;
+//! # Ok::<(), tpt_vault_core::VaultError>(())
+//! ```
+
+pub mod backend;
+mod block;
+pub mod config;
+pub mod error;
+mod file;
+mod fsvault;
+mod keys;
+mod names;
+mod recovery;
+
+pub use backend::{EntryInfo, EntryKind, VaultBackend, VaultFile, copy_from_file, copy_into_file};
+pub use config::{CONFIG_FILE_NAME, FORMAT_VERSION, KdfParams};
+pub use error::{Result, VaultError};
+pub use file::FileHandle;
+pub use fsvault::FsVault;
+pub use recovery::RecoveryCode;
 
 /// Crate version, exposed so frontends and platform crates can report it.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
