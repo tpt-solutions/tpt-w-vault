@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# Copyright (c) 2026 TPT Solutions
+
+[workspace]
+resolver = "2"
+members = [
+    "core",
+    "platform-windows",
+    "platform-linux",
+    "platform-archon",
+]
+# src-tauri is added in Phase 8 (Tauri shell).
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+authors = ["TPT Solutions"]
+repository = "https://github.com/tpt-solutions/tpt-vault"
