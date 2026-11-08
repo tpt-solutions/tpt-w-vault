@@ -12,3 +12,5 @@ repository.workspace = true
 description = "tpt-vault: platform-linux crate"
 
 [dependencies]
+tpt-vault-core = { version = "0.1.0", path = "../core" }
+zbus = "5"

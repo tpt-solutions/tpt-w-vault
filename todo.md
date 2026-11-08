@@ -52,7 +52,7 @@ Decisions locked in for this roadmap:
 | 1  | Core Vault Format & Crypto Engine                  | 🟡 In Progress (core implemented, tested) |
 | 2  | Key Management & Unlock Flows                      | 🟡 In Progress (re-key, mlock open) |
 | 3  | Windows Platform Integration                       | 🟡 In Progress (Hello prompt unverified by hand) |
-| 4  | Linux Platform Integration                         | ❌ Not Started |
+| 4  | Linux Platform Integration                         | 🟡 In Progress (untested on Linux) |
 | 5  | Windows Mount Backend                              | ❌ Not Started |
 | 6  | Linux Mount Backend                                | ❌ Not Started |
 | 7  | Secure Markdown Editor                             | ❌ Not Started |
@@ -142,14 +142,18 @@ Decisions locked in for this roadmap:
       Live DPAPI and Credential Manager round trips run in `platform-windows`
 
 ## Phase 4 — Linux Platform Integration
-- [ ] Secret Service client via `zbus` (D-Bus `org.freedesktop.secrets`) for storing the
-      platform-wrapped key in GNOME Keyring/KWallet
-- [ ] Biometric gating via `fprintd` D-Bus API where available; PAM fingerprint integration
-      documented for system-level unlock flows
-- [ ] Fallback path when no Secret Service provider or fingerprint reader is available
-      (passphrase-only unlock)
-- [ ] Verify behavior across at least one GNOME and one KDE session
-- [ ] Unit tests: Secret Service round-trip (mocked D-Bus), fallback detection
+- [~] Secret Service client via `zbus` (`platform-linux/src/secret_service.rs`) for storing
+      the platform key in GNOME Keyring/KWallet. Written against the spec, and compiles on
+      all platforms. Not yet run against a live keyring: the dev machine is Windows, and no
+      Linux session is available here. Interactive keyring prompts are not supported
+- [~] Biometric gating via `fprintd` (`platform-linux/src/fprintd.rs`), written against the
+      `net.reactivated.Fprint` API, with the same caveat. PAM integration for system-level
+      unlock is not started
+- [x] Fallback path when no Secret Service provider or fingerprint reader is available:
+      `platform_unlock_supported()` returns false, and `linux_unlock()` fails without a bus
+- [ ] Verify behavior across at least one GNOME and one KDE session (needs real Linux sessions)
+- [~] Unit tests: fallback detection and the key passthrough are tested. The Secret Service
+      round trip needs a live bus or a mock of the D-Bus layer, which is not built yet
 
 ## Phase 5 — Windows Mount Backend
 - [ ] WinFsp integration (Rust bindings) implementing a filesystem provider backed by
