@@ -431,15 +431,77 @@ fn only_disk_dir_name(root: &Path) -> String {
 }
 
 #[test]
-fn over_long_names_are_refused() {
+fn names_over_255_bytes_are_refused() {
     let dir = tempfile::tempdir().unwrap();
     let vault = new_vault(&dir);
-    let ok = "a".repeat(175);
-    vault.create_file(&ok).expect("175-byte name fits");
-    let too_long = "a".repeat(176);
+    let too_long = "a".repeat(256);
     assert!(matches!(
         vault.create_file(&too_long),
         Err(VaultError::NameTooLong(_))
+    ));
+}
+
+/// Names whose encrypted form exceeds 255 bytes are stored under hashed long names.
+#[test]
+fn long_names_round_trip_and_leave_no_orphans() {
+    let dir = tempfile::tempdir().unwrap();
+    let vault = new_vault(&dir);
+    let long_dir = "d".repeat(250);
+    let long_file = format!("{}.md", "f".repeat(250));
+    vault.create_dir(&long_dir).unwrap();
+    write_file(&vault, &format!("{long_dir}/{long_file}"), b"long!");
+
+    let names: Vec<String> = vault
+        .list_dir(&long_dir)
+        .unwrap()
+        .into_iter()
+        .map(|e| e.name)
+        .collect();
+    assert_eq!(names, vec![long_file.clone()]);
+    assert_eq!(
+        read_all(&vault, &format!("{long_dir}/{long_file}")),
+        b"long!"
+    );
+
+    // Rename a long-named file to another long name, then to a short one.
+    let renamed = format!("{long_dir}/{}.md", "g".repeat(250));
+    vault
+        .rename(&format!("{long_dir}/{long_file}"), &renamed)
+        .unwrap();
+    vault
+        .rename(&renamed, &format!("{long_dir}/short.md"))
+        .unwrap();
+    assert_eq!(read_all(&vault, &format!("{long_dir}/short.md")), b"long!");
+
+    // Every sidecar must be gone once nothing long-named remains in that directory.
+    vault.remove(&format!("{long_dir}/short.md")).unwrap();
+    vault.remove(&long_dir).unwrap();
+    assert!(vault.list_dir("").unwrap().is_empty());
+    let leftovers: Vec<_> = fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n != CONFIG_FILE_NAME)
+        .collect();
+    assert!(leftovers.is_empty(), "leftover entries: {leftovers:?}");
+}
+
+#[test]
+fn tampered_long_name_sidecar_is_detected() {
+    let dir = tempfile::tempdir().unwrap();
+    let vault = new_vault(&dir);
+    let name = "s".repeat(250);
+    write_file(&vault, &name, b"x");
+
+    let sidecar = fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| p.to_string_lossy().ends_with(".name"))
+        .expect("sidecar exists");
+    fs::write(&sidecar, "AAAA").unwrap();
+
+    assert!(matches!(
+        vault.list_dir(""),
+        Err(VaultError::Corrupt { .. })
     ));
 }
 

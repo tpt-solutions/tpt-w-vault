@@ -212,3 +212,58 @@ fn unrelated_recovery_code() -> RecoveryCode {
     let (_v, code) = FsVault::create(other.path(), b"x", TEST_KDF).unwrap();
     code
 }
+
+#[test]
+fn rekey_preserves_contents_and_re_encrypts_everything() {
+    let dir = tempfile::tempdir().unwrap();
+    let (vault, old_code) = create(&dir);
+    vault.create_dir("sub").unwrap();
+    write_file(&vault, "sub/a.md", &vec![7u8; 10_000]);
+    write_file(&vault, "b.txt", b"bee");
+    let before: Vec<Vec<u8>> = encrypted_snapshot(dir.path())
+        .into_iter()
+        .map(|(_, bytes)| bytes)
+        .collect();
+
+    let (vault, new_code) = vault.rekey(NEW_PASS, TEST_KDF).unwrap();
+    assert_eq!(read_all(&vault, "sub/a.md"), vec![7u8; 10_000]);
+    assert_eq!(read_all(&vault, "b.txt"), b"bee");
+
+    let after: Vec<Vec<u8>> = encrypted_snapshot(dir.path())
+        .into_iter()
+        .map(|(_, bytes)| bytes)
+        .collect();
+    assert_eq!(after.len(), before.len());
+    for bytes in &after {
+        assert!(
+            !before.contains(bytes),
+            "a ciphertext survived the re-key unchanged"
+        );
+    }
+    drop(vault);
+
+    assert!(matches!(
+        FsVault::open(dir.path(), PASS),
+        Err(VaultError::WrongPassphrase)
+    ));
+    assert!(FsVault::open(dir.path(), NEW_PASS).is_ok());
+    assert!(matches!(
+        FsVault::open_with_recovery(dir.path(), old_code.as_str()),
+        Err(VaultError::WrongPassphrase)
+    ));
+    assert!(FsVault::open_with_recovery(dir.path(), new_code.as_str()).is_ok());
+
+    let name = dir
+        .path()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    for suffix in ["rekey-tmp", "rekey-old"] {
+        assert!(
+            !dir.path()
+                .with_file_name(format!("{name}.{suffix}"))
+                .exists()
+        );
+    }
+}

@@ -8,24 +8,39 @@
 //! names are not. Because names are encrypted per segment (not per path), renaming or moving
 //! a directory never requires re-encrypting anything below it.
 //!
+//! **Long names.** An encrypted segment longer than 255 bytes cannot be a filename. Such
+//! entries are stored as `longname.<sha256 of the encrypted name>`, and a sidecar file with the
+//! same name plus `.name` holds the full encrypted name. Listing checks the sidecar against the
+//! hash, so a swapped sidecar is reported as corruption.
+//!
 //! An open `FsVault` is an unlocked session. It holds the master key and derived subkeys, both
 //! zeroized on drop. [`FsVault::lock`] ends the session by dropping it.
 
 use std::{
     fs,
+    io::ErrorKind,
     path::{Path, PathBuf},
     sync::Arc,
 };
 
-use zeroize::Zeroize;
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use sha2::{Digest, Sha256};
+use zeroize::{Zeroize, Zeroizing};
 
-use crate::backend::{EntryInfo, EntryKind, VaultBackend, map_io, split_path};
+use crate::backend::{
+    EntryInfo, EntryKind, STREAM_CHUNK, VaultBackend, VaultFile, map_io, split_path,
+};
 use crate::config::{CONFIG_FILE_NAME, KdfParams, VaultConfig};
 use crate::error::{Result, VaultError};
 use crate::file::{FileHandle, plaintext_len_for_disk};
 use crate::keys::{DerivedKeys, MasterKey};
 use crate::names::{decrypt_segment, encrypt_segment};
 use crate::recovery::{self, RecoveryCode};
+
+/// Largest encrypted name that is stored directly as a filename.
+const MAX_DISK_NAME_LEN: usize = 255;
+const LONG_PREFIX: &str = "longname.";
+const SIDECAR_SUFFIX: &str = ".name";
 
 /// An unlocked vault backed by a directory on disk.
 pub struct FsVault {
@@ -112,6 +127,44 @@ impl FsVault {
         Ok(code)
     }
 
+    /// Re-keys the vault: every file is re-encrypted under a brand-new master key and name key.
+    ///
+    /// The vault is copied into a sibling directory (`<name>.rekey-tmp`), then swapped into
+    /// place, and the old directory is deleted. The original stays untouched until the copy is
+    /// complete, so a crash before the swap loses nothing. Peak disk use is roughly double the
+    /// vault size.
+    ///
+    /// Consumes the session, since its keys no longer match the vault. The new session and a
+    /// new recovery code are returned. Old recovery codes stop working.
+    pub fn rekey(self, passphrase: &[u8], params: KdfParams) -> Result<(FsVault, RecoveryCode)> {
+        let root = self.root.clone();
+        let tmp = sibling(&root, "rekey-tmp")?;
+        let old = sibling(&root, "rekey-old")?;
+        if old.exists() {
+            return Err(VaultError::AlreadyExists(
+                old.to_string_lossy().into_owned(),
+            ));
+        }
+        if tmp.exists() {
+            // Left behind by an interrupted attempt. The original vault is still authoritative.
+            fs::remove_dir_all(&tmp)?;
+        }
+
+        let (fresh, code) = FsVault::create(&tmp, passphrase, params)?;
+        copy_tree(&self, &fresh, "")?;
+
+        fs::rename(&root, &old)?;
+        if let Err(e) = fs::rename(&tmp, &root) {
+            // Put the original back so the user is not left without a vault.
+            let _ = fs::rename(&old, &root);
+            return Err(e.into());
+        }
+        fs::remove_dir_all(&old)?;
+
+        let FsVault { master, keys, .. } = fresh;
+        Ok((FsVault { root, master, keys }, code))
+    }
+
     /// Locks the vault. Dropping the session zeroizes the master key and derived keys.
     pub fn lock(self) {}
 
@@ -129,6 +182,16 @@ impl FsVault {
         self.root.join(CONFIG_FILE_NAME)
     }
 
+    /// Encrypted on-disk name for one plaintext segment, shortened if it is too long.
+    fn disk_name(&self, segment: &str) -> Result<String> {
+        let enc = encrypt_segment(&self.keys.name, segment)?;
+        Ok(if enc.len() <= MAX_DISK_NAME_LEN {
+            enc
+        } else {
+            long_name_for(&enc)
+        })
+    }
+
     /// Maps a plaintext path to its encrypted location on disk.
     fn disk_path(&self, plain: &str) -> Result<PathBuf> {
         let segments = split_path(plain)?;
@@ -140,7 +203,7 @@ impl FsVault {
         }
         let mut path = self.root.clone();
         for seg in segments {
-            path.push(encrypt_segment(&self.keys.name, seg)?);
+            path.push(self.disk_name(seg)?);
         }
         Ok(path)
     }
@@ -154,6 +217,62 @@ impl FsVault {
             });
         }
         self.disk_path(plain)
+    }
+
+    /// Sidecar file for an entry stored under a long name, if it has one.
+    fn sidecar_path(&self, plain: &str) -> Result<Option<PathBuf>> {
+        let disk = self.disk_entry_path(plain)?;
+        let name = disk
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        if !name.starts_with(LONG_PREFIX) {
+            return Ok(None);
+        }
+        Ok(Some(disk.with_file_name(format!("{name}{SIDECAR_SUFFIX}"))))
+    }
+
+    /// Writes the sidecar for `plain`, if it needs one. Must run before the entry is created
+    /// so a listing never sees an entry it cannot name.
+    fn write_sidecar(&self, plain: &str) -> Result<()> {
+        if let Some(sidecar) = self.sidecar_path(plain)? {
+            let last = split_path(plain)?.last().copied().unwrap_or_default();
+            let enc = encrypt_segment(&self.keys.name, last)?;
+            fs::write(sidecar, enc)?;
+        }
+        Ok(())
+    }
+
+    /// Removes the sidecar for `plain`, ignoring a missing one.
+    fn remove_sidecar(&self, plain: &str) -> Result<()> {
+        if let Some(sidecar) = self.sidecar_path(plain)? {
+            match fs::remove_file(sidecar) {
+                Ok(()) => {}
+                Err(e) if e.kind() == ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Ok(())
+    }
+
+    /// Reads and verifies the full encrypted name stored in a long-name entry's sidecar.
+    fn read_long_name(&self, dir: &Path, disk_name: &str) -> Result<String> {
+        let corrupt = |detail: &str| VaultError::Corrupt {
+            path: disk_name.to_owned(),
+            detail: detail.to_owned(),
+        };
+        let sidecar = dir.join(format!("{disk_name}{SIDECAR_SUFFIX}"));
+        let enc = fs::read_to_string(&sidecar).map_err(|e| {
+            if e.kind() == ErrorKind::NotFound {
+                corrupt("long-name sidecar is missing")
+            } else {
+                VaultError::Io(e)
+            }
+        })?;
+        if long_name_for(&enc) != disk_name {
+            return Err(corrupt("long-name sidecar does not match its entry"));
+        }
+        Ok(enc)
     }
 
     fn info_for(&self, plain_name: String, disk: &Path, plain_path: &str) -> Result<EntryInfo> {
@@ -179,11 +298,72 @@ impl FsVault {
     }
 }
 
+/// Stored name for an encrypted segment too long to be a filename.
+fn long_name_for(enc: &str) -> String {
+    let digest = Sha256::digest(enc.as_bytes());
+    format!("{LONG_PREFIX}{}", URL_SAFE_NO_PAD.encode(digest))
+}
+
+/// `<root>.<suffix>` in the same parent directory.
+fn sibling(root: &Path, suffix: &str) -> Result<PathBuf> {
+    let name = root
+        .file_name()
+        .ok_or_else(|| VaultError::InvalidPath {
+            path: root.to_string_lossy().into_owned(),
+            reason: "vault root has no directory name",
+        })?
+        .to_string_lossy();
+    Ok(root.with_file_name(format!("{name}.{suffix}")))
+}
+
+/// Copies every directory and file under `path` from `src` into `dst`, decrypting with
+/// `src`'s keys and encrypting with `dst`'s.
+fn copy_tree(src: &FsVault, dst: &FsVault, path: &str) -> Result<()> {
+    for entry in src.list_dir(path)? {
+        let child = if path.is_empty() {
+            entry.name.clone()
+        } else {
+            format!("{path}/{}", entry.name)
+        };
+        match entry.kind {
+            EntryKind::Directory => {
+                dst.create_dir(&child)?;
+                copy_tree(src, dst, &child)?;
+            }
+            EntryKind::File => copy_file(src, dst, &child, entry.size)?,
+        }
+    }
+    Ok(())
+}
+
+fn copy_file(src: &FsVault, dst: &FsVault, path: &str, size: u64) -> Result<()> {
+    let mut from = src.open_file(path)?;
+    let mut to = dst.create_file(path)?;
+    let mut buf = Zeroizing::new(vec![0u8; STREAM_CHUNK]);
+    let mut offset = 0u64;
+    loop {
+        let n = from.read_at(offset, &mut buf)?;
+        if n == 0 {
+            break;
+        }
+        to.write_at(offset, &buf[..n])?;
+        offset += n as u64;
+    }
+    if offset != size {
+        return Err(VaultError::Corrupt {
+            path: path.to_owned(),
+            detail: format!("copied {offset} bytes but listing reported {size}"),
+        });
+    }
+    Ok(())
+}
+
 impl VaultBackend for FsVault {
     type File = FileHandle;
 
     fn create_dir(&self, path: &str) -> Result<()> {
         let disk = self.disk_entry_path(path)?;
+        self.write_sidecar(path)?;
         fs::create_dir(&disk).map_err(|e| map_io(path, e))
     }
 
@@ -204,7 +384,15 @@ impl VaultBackend for FsVault {
             if at_root && disk_name == CONFIG_FILE_NAME {
                 continue;
             }
-            let plain_name = decrypt_segment(&self.keys.name, disk_name)?;
+            if disk_name.starts_with(LONG_PREFIX) && disk_name.ends_with(SIDECAR_SUFFIX) {
+                continue;
+            }
+            let enc = if disk_name.starts_with(LONG_PREFIX) {
+                self.read_long_name(&disk, disk_name)?
+            } else {
+                disk_name.to_owned()
+            };
+            let plain_name = decrypt_segment(&self.keys.name, &enc)?;
             let child_path = if path.is_empty() {
                 plain_name.clone()
             } else {
@@ -218,6 +406,7 @@ impl VaultBackend for FsVault {
 
     fn create_file(&self, path: &str) -> Result<FileHandle> {
         let disk = self.disk_entry_path(path)?;
+        self.write_sidecar(path)?;
         FileHandle::create(&disk, path, Arc::clone(&self.keys))
     }
 
@@ -233,10 +422,11 @@ impl VaultBackend for FsVault {
         let disk = self.disk_entry_path(path)?;
         let meta = fs::metadata(&disk).map_err(|e| map_io(path, e))?;
         if meta.is_dir() {
-            fs::remove_dir(&disk).map_err(|e| map_io(path, e))
+            fs::remove_dir(&disk).map_err(|e| map_io(path, e))?;
         } else {
-            fs::remove_file(&disk).map_err(|e| map_io(path, e))
+            fs::remove_file(&disk).map_err(|e| map_io(path, e))?;
         }
+        self.remove_sidecar(path)
     }
 
     fn rename(&self, from: &str, to: &str) -> Result<()> {
@@ -247,7 +437,9 @@ impl VaultBackend for FsVault {
         if to_disk.exists() {
             return Err(VaultError::AlreadyExists(to.to_owned()));
         }
-        fs::rename(&from_disk, &to_disk).map_err(|e| map_io(to, e))
+        self.write_sidecar(to)?;
+        fs::rename(&from_disk, &to_disk).map_err(|e| map_io(to, e))?;
+        self.remove_sidecar(from)
     }
 
     fn stat(&self, path: &str) -> Result<EntryInfo> {

@@ -28,6 +28,7 @@ use crate::backend::{VaultFile, map_io};
 use crate::block::{self, BLOCK_SIZE, RECORD_LEN, RECORD_OVERHEAD};
 use crate::error::{Result, VaultError};
 use crate::keys::{DerivedKeys, random_bytes};
+use zeroize::Zeroizing;
 
 const MAGIC: &[u8; 4] = b"TPTV";
 const FILE_FORMAT_VERSION: u8 = 1;
@@ -145,7 +146,7 @@ impl FileHandle {
     }
 
     /// Decrypts block `index`. `total` is the current on-disk length.
-    fn read_block(&mut self, index: u64, total: u64) -> Result<Vec<u8>> {
+    fn read_block(&mut self, index: u64, total: u64) -> Result<Zeroizing<Vec<u8>>> {
         let body = total - HEADER_LEN_U64;
         let start = index * RECORD_LEN_U64;
         if start >= body {
@@ -161,6 +162,7 @@ impl FileHandle {
         self.file.read_exact(&mut record)?;
         let aad = self.aad(index, is_last);
         block::open(&self.keys.content, &aad, &record)
+            .map(Zeroizing::new)
             .ok_or_else(|| self.corrupt(index, "failed authentication"))
     }
 
@@ -230,7 +232,7 @@ impl VaultFile for FileHandle {
             } else {
                 BLOCK_SIZE_U64
             } as usize;
-            let mut plain = vec![0u8; block_len];
+            let mut plain = Zeroizing::new(vec![0u8; block_len]);
 
             let fully_overwritten = offset <= block_start && end >= block_start + block_len as u64;
             let had_old_data = old_len > block_start;

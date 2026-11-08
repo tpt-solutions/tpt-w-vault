@@ -100,18 +100,21 @@ Decisions locked in for this roadmap:
       file id, block index and last-block flag, so reordering and truncation are detected
 - [x] Core unit tests: round-trip encrypt/decrypt, tamper detection, large-file streaming,
       filename encryption collisions (`core/tests/vault.rs`, 22 integration tests)
-- [ ] Long filenames (>175 bytes plaintext): add hashed long-name files so they are not refused
-- [ ] Nonce budget: content nonces are random 96-bit per block write; define a per-key write
-      limit (or key rotation) well below the ~2^32 birthday bound
-- [ ] Crash consistency: a multi-block `write_at` that crashes midway can leave mixed old/new
-      blocks. Each block authenticates, but the set may not be a consistent state. Covered by
-      the Phase 12 data-loss test; consider a write-ahead journal
-- [ ] Zeroize plaintext buffers in the read/write paths (currently plain `Vec<u8>`)
+- [x] Long filenames: encrypted names over 255 bytes use hashed `longname.*` entries with a
+      verified `.name` sidecar (`core/src/fsvault.rs`). Plaintext segments up to 255 bytes work
+- [~] Nonce budget: policy written in `docs/crypto.md` (soft 2^31, hard 2^32 block writes per
+      content key). Not enforced in code: the write count needs persisting per key
+- [ ] Crash consistency: an interrupted multi-block extend can leave the old last block
+      sealed as non-final, so the file reads as `Corrupt`. Needs a write-ahead journal (see
+      `docs/crypto.md`, "Known gaps")
+- [x] Zeroize plaintext buffers in the file layer (`Zeroizing<Vec<u8>>`). Caller buffers are
+      not covered
 
 ## Phase 2 — Key Management & Unlock Flows
 - [x] Master key generation (CSPRNG), lifecycle: create vault, unlock, lock
-- [ ] Re-key: rotate the master key itself. Not implemented. It requires re-encrypting every
-      file's contents, so it needs a dedicated migration step (deferred)
+- [x] Re-key: `FsVault::rekey` copies the vault into a sibling directory under new keys, then
+      swaps it in. The original is untouched until the copy completes. Peak disk use is
+      about 2x the vault size
 - [x] Passphrase-based unlock: scrypt-derive a wrapping key from passphrase, unwrap master key
 - [x] Passphrase change: re-wrap master key without touching file contents (verified byte-for-byte
       in `core/tests/keys.rs`)
