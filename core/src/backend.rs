@@ -44,6 +44,9 @@ pub trait VaultFile {
 
     /// Writes `data` at `offset`, extending the file (zero-filling any gap) as needed.
     fn write_at(&mut self, offset: u64, data: &[u8]) -> Result<()>;
+
+    /// Sets the plaintext length: shrinks (discarding the tail) or extends with zero bytes.
+    fn truncate(&mut self, len: u64) -> Result<()>;
 }
 
 /// Storage operations on a single unlocked vault.

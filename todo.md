@@ -53,8 +53,8 @@ Decisions locked in for this roadmap:
 | 2  | Key Management & Unlock Flows                      | 🟡 In Progress (re-key, mlock open) |
 | 3  | Windows Platform Integration                       | 🟡 In Progress (Hello prompt unverified by hand) |
 | 4  | Linux Platform Integration                         | 🟡 In Progress (untested on Linux) |
-| 5  | Windows Mount Backend                              | ❌ Not Started |
-| 6  | Linux Mount Backend                                | ❌ Not Started |
+| 5  | Windows Mount Backend                              | ⛔ Blocked (WinFsp not installed; needs approval) |
+| 6  | Linux Mount Backend                                | 🟡 In Progress (adapter uncompiled; needs Linux) |
 | 7  | Secure Markdown Editor                             | ❌ Not Started |
 | 8  | Tauri Shell & IPC Layer                             | ❌ Not Started |
 | 9  | Frontend (Vault Browser / Editor / Settings)       | ❌ Not Started |
@@ -157,21 +157,29 @@ Decisions locked in for this roadmap:
 
 ## Phase 5 — Windows Mount Backend
 - [ ] WinFsp integration (Rust bindings) implementing a filesystem provider backed by
-      `VaultBackend`
-- [ ] Virtual drive letter assignment/lifecycle (mount on unlock, unmount on lock/app exit)
-- [ ] Handle Windows-specific filesystem semantics (attributes, reserved names, path length)
-- [ ] Clean unmount on crash/forced app termination (no orphaned drive letters)
+      `VaultBackend`. **Blocked:** WinFsp is not installed on the dev machine. Installing its
+      driver is a system change that needs your approval
+- [ ] Virtual drive letter assignment/lifecycle (mount on unlock, unmount on lock/app exit).
+      Blocked on the same install
+- [~] Handle Windows-specific filesystem semantics. The shared inode layer
+      (`core/src/mount.rs`) covers rename and replace rules. Not yet handled: reserved device
+      names (CON, NUL, ...), trailing dots and spaces, and attributes
+- [ ] Clean unmount on crash/forced app termination (no orphaned drive letters). Blocked, as above
 - [ ] Integration tests: file CRUD through the mounted drive, large-file streaming, crash-unmount
-      recovery
+      recovery. Blocked, as above
 
 ## Phase 6 — Linux Mount Backend
-- [ ] FUSE integration via the `fuser` crate implementing a filesystem provider backed by
-      `VaultBackend`
-- [ ] Mount point lifecycle (mount on unlock, unmount on lock/app exit)
-- [ ] Handle POSIX filesystem semantics (permissions, symlinks within vault, path length)
-- [ ] Clean unmount on crash/forced app termination (no stale mount points)
+- [~] FUSE integration via `fuser`. The inode layer is done and tested (`core/src/mount.rs`).
+      The adapter is written (`platform-linux/src/fuse.rs`) but not compiled, since no Linux
+      build environment is available. It is not wired into the crate yet, to keep the Linux
+      CI job green
+- [ ] Mount point lifecycle (mount on unlock, unmount on lock/app exit). Needs a Linux machine
+- [~] Handle POSIX semantics. Rename, replace, and inode stability are covered. Permissions
+      are fixed by the vault (0700 directories, 0600 files). Symlinks are not supported
+- [ ] Clean unmount on crash/forced app termination (no stale mount points). `AutoUnmount` is
+      set in the adapter. Unverified until run on Linux
 - [ ] Integration tests: file CRUD through the FUSE mount, large-file streaming, crash-unmount
-      recovery
+      recovery. Needs a Linux machine
 
 ## Phase 7 — Secure Markdown Editor
 - [ ] In-app markdown editor component (edit + live preview) operating directly on vault entries

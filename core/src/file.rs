@@ -183,6 +183,39 @@ impl VaultFile for FileHandle {
         self.plain_len_of(total)
     }
 
+    fn truncate(&mut self, new_len: u64) -> Result<()> {
+        let total = self.total_on_disk()?;
+        let old_len = self.plain_len_of(total)?;
+        if new_len > old_len {
+            let zeros = Zeroizing::new(vec![0u8; BLOCK_SIZE]);
+            let mut pos = old_len;
+            while pos < new_len {
+                let n = ((new_len - pos) as usize).min(zeros.len());
+                self.write_at(pos, &zeros[..n])?;
+                pos += n as u64;
+            }
+            return Ok(());
+        }
+        if new_len == old_len {
+            return Ok(());
+        }
+        if new_len == 0 {
+            self.file.set_len(HEADER_LEN_U64)?;
+            self.file.sync_data()?;
+            return Ok(());
+        }
+        // Shrink: re-seal the new last block as final, then cut the file after its record.
+        let index = (new_len - 1) / BLOCK_SIZE_U64;
+        let block_len = (new_len - index * BLOCK_SIZE_U64) as usize;
+        let mut plain = self.read_block(index, total)?;
+        plain.truncate(block_len);
+        self.write_block(index, true, &plain)?;
+        let end = HEADER_LEN_U64 + index * RECORD_LEN_U64 + block_len as u64 + OVERHEAD_U64;
+        self.file.set_len(end)?;
+        self.file.sync_data()?;
+        Ok(())
+    }
+
     fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<usize> {
         let total = self.total_on_disk()?;
         let len = self.plain_len_of(total)?;

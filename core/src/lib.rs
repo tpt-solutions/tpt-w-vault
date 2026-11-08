@@ -29,6 +29,7 @@ pub mod error;
 mod file;
 mod fsvault;
 mod keys;
+pub mod mount;
 mod names;
 mod platform;
 mod recovery;
@@ -38,6 +39,7 @@ pub use config::{CONFIG_FILE_NAME, FORMAT_VERSION, KdfParams};
 pub use error::{Result, VaultError};
 pub use file::FileHandle;
 pub use fsvault::FsVault;
+pub use mount::{ROOT_INO, VaultTree};
 pub use platform::{
     ConsentGate, PLATFORM_KEY_LEN, PlatformKey, PlatformUnlock, Protector, SecretStore,
 };
