@@ -1,0 +1,32 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# Copyright (c) 2026 TPT Solutions
+
+[package]
+name = "tpt-vault-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "tpt-vault desktop app (Tauri shell)"
+build = "build.rs"
+
+[[bin]]
+name = "tpt-vault"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = ["tray-icon"] }
+tpt-vault-core = { path = "../core" }
+
+[target.'cfg(windows)'.dependencies]
+tpt-vault-platform-windows = { path = "../platform-windows" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+tpt-vault-platform-linux = { path = "../platform-linux" }
+
+[build-dependencies]
+tauri-build = "2"

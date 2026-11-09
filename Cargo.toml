@@ -8,8 +8,8 @@ members = [
     "platform-windows",
     "platform-linux",
     "platform-archon",
+    "src-tauri",
 ]
-# src-tauri is added in Phase 8 (Tauri shell).
 
 [workspace.package]
 version = "0.1.0"
