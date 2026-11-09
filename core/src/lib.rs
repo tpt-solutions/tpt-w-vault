@@ -28,6 +28,7 @@ pub mod config;
 pub mod error;
 mod file;
 mod fsvault;
+mod journal;
 mod keys;
 pub mod mount;
 mod names;

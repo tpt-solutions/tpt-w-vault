@@ -24,9 +24,12 @@ use std::{
     sync::Arc,
 };
 
+use std::path::PathBuf;
+
 use crate::backend::{VaultFile, map_io};
 use crate::block::{self, BLOCK_SIZE, RECORD_LEN, RECORD_OVERHEAD};
 use crate::error::{Result, VaultError};
+use crate::journal;
 use crate::keys::{DerivedKeys, random_bytes};
 use zeroize::Zeroizing;
 
@@ -61,6 +64,8 @@ pub struct FileHandle {
     file: File,
     keys: Arc<DerivedKeys>,
     header: [u8; HEADER_LEN],
+    /// Path of the encrypted file on disk. Its journal sits beside it.
+    disk: PathBuf,
     /// Plaintext path, for error messages.
     path: String,
 }
@@ -74,6 +79,9 @@ impl FileHandle {
             .create_new(true)
             .open(disk)
             .map_err(|e| map_io(plain, e))?;
+        // A journal left by an earlier file at this path belongs to that file. Drop it, so it
+        // cannot be applied to this one.
+        journal::discard(disk)?;
         let file_id: [u8; FILE_ID_LEN] = random_bytes();
         let mut header = [0u8; HEADER_LEN];
         header[..4].copy_from_slice(MAGIC);
@@ -83,6 +91,7 @@ impl FileHandle {
             file,
             keys,
             header,
+            disk: disk.to_path_buf(),
             path: plain.to_owned(),
         };
         handle.file.write_all(&header)?;
@@ -90,8 +99,10 @@ impl FileHandle {
         Ok(handle)
     }
 
-    /// Opens an existing encrypted file and checks its header.
+    /// Opens an existing encrypted file and checks its header. An interrupted write left by an
+    /// earlier session is undone first.
     pub(crate) fn open(disk: &Path, plain: &str, keys: Arc<DerivedKeys>) -> Result<Self> {
+        journal::recover(disk)?;
         let mut file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -116,6 +127,7 @@ impl FileHandle {
             file,
             keys,
             header,
+            disk: disk.to_path_buf(),
             path: plain.to_owned(),
         })
     }
@@ -173,7 +185,43 @@ impl FileHandle {
         self.file
             .seek(SeekFrom::Start(HEADER_LEN_U64 + index * RECORD_LEN_U64))?;
         self.file.write_all(&record)?;
+        #[cfg(test)]
+        journal::failpoint::tick()?;
         Ok(())
+    }
+
+    /// Runs `op`, which changes the disk bytes in `saved_from..saved_to`, under a journal.
+    ///
+    /// The journal is in place before `op` runs and is removed after the data is synced. If `op`
+    /// fails, the saved bytes are restored at once, so the caller never sees a half-written file.
+    fn guarded(
+        &mut self,
+        saved_from: u64,
+        saved_to: u64,
+        op: impl FnOnce(&mut FileHandle) -> Result<()>,
+    ) -> Result<()> {
+        let old_total = self.total_on_disk()?;
+        journal::begin(
+            &self.disk,
+            &mut self.file,
+            &self.header,
+            old_total,
+            saved_from,
+            saved_to,
+        )?;
+        match op(self).and_then(|()| Ok(self.file.sync_data()?)) {
+            Ok(()) => journal::finish(&self.disk),
+            Err(e) => {
+                // A simulated crash must leave the journal behind, as a real one would.
+                #[cfg(test)]
+                if journal::failpoint::take_crash() {
+                    return Err(e);
+                }
+                // If the restore itself fails, the journal stays and the next open retries it.
+                let _ = journal::rollback(&self.disk, &mut self.file, &self.header);
+                Err(e)
+            }
+        }
     }
 }
 
@@ -200,20 +248,25 @@ impl VaultFile for FileHandle {
             return Ok(());
         }
         if new_len == 0 {
-            self.file.set_len(HEADER_LEN_U64)?;
-            self.file.sync_data()?;
-            return Ok(());
+            // Everything after the header goes, so the whole tail is saved.
+            return self.guarded(HEADER_LEN_U64, total, |this| {
+                this.file.set_len(HEADER_LEN_U64)?;
+                Ok(())
+            });
         }
         // Shrink: re-seal the new last block as final, then cut the file after its record.
+        // The cut removes bytes that cannot be recomputed, so the journal keeps the whole tail.
         let index = (new_len - 1) / BLOCK_SIZE_U64;
         let block_len = (new_len - index * BLOCK_SIZE_U64) as usize;
-        let mut plain = self.read_block(index, total)?;
-        plain.truncate(block_len);
-        self.write_block(index, true, &plain)?;
-        let end = HEADER_LEN_U64 + index * RECORD_LEN_U64 + block_len as u64 + OVERHEAD_U64;
-        self.file.set_len(end)?;
-        self.file.sync_data()?;
-        Ok(())
+        let saved_from = HEADER_LEN_U64 + index * RECORD_LEN_U64;
+        self.guarded(saved_from, total, |this| {
+            let mut plain = this.read_block(index, total)?;
+            plain.truncate(block_len);
+            this.write_block(index, true, &plain)?;
+            let end = saved_from + block_len as u64 + OVERHEAD_U64;
+            this.file.set_len(end)?;
+            Ok(())
+        })
     }
 
     fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<usize> {
@@ -257,7 +310,29 @@ impl VaultFile for FileHandle {
             let old_last = (old_len - 1) / BLOCK_SIZE_U64;
             old_last.min(offset / BLOCK_SIZE_U64)
         };
+        // Records from `start` to `last` are rewritten. The journal saves the ones that exist.
+        let saved_from = HEADER_LEN_U64 + start * RECORD_LEN_U64;
+        let saved_to = HEADER_LEN_U64 + (last + 1) * RECORD_LEN_U64;
+        self.guarded(saved_from, saved_to, |this| {
+            this.write_blocks(offset, data, old_len, total, start, last, new_len)
+        })
+    }
+}
 
+impl FileHandle {
+    /// Writes the records `start..=last` for a write of `data` at `offset`. Runs under a journal.
+    #[allow(clippy::too_many_arguments)]
+    fn write_blocks(
+        &mut self,
+        offset: u64,
+        data: &[u8],
+        old_len: u64,
+        total: u64,
+        start: u64,
+        last: u64,
+        new_len: u64,
+    ) -> Result<()> {
+        let end = offset + data.len() as u64;
         for index in start..=last {
             let block_start = index * BLOCK_SIZE_U64;
             let block_len = if index == last {
@@ -284,7 +359,6 @@ impl VaultFile for FileHandle {
 
             self.write_block(index, index == last, &plain)?;
         }
-        self.file.sync_data()?;
         Ok(())
     }
 }

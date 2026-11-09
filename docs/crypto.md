@@ -77,10 +77,22 @@ The write count per key must be persisted for enforcement. That is tracked as a 
 
 ## Known gaps
 
-- **Crash consistency.** A multi-block write that is interrupted can leave a file whose last
-  record was re-sealed with `is_last = false` before the new last record exists. The result is
-  a `Corrupt` error on read, not silent data loss, but the file is damaged. The fix is a
-  write-ahead journal, which is not implemented.
+- **Crash consistency (handled for writes, with limits).** Writes that change existing records,
+  and truncations, run under a write-ahead journal (`core/src/journal.rs`). Before the data
+  changes, the original bytes of the affected records (and of the whole tail, for a cut) are
+  saved to `<record>.journal`. The journal is written to a temporary file and renamed into place,
+  so it is either absent or complete. It is removed only after the new data is synced. A write
+  that returns an error is undone at once. After a crash, the next open, stat, rename or remove
+  of that file restores the saved bytes and the old length, so the file reads as it did before
+  the interrupted write. A write that did not return is treated as not having happened.
+  - Limits: creating a file is not journaled. A crash during `create_file` can leave an empty
+    or torn file. A cut (`truncate` to a shorter length) saves the whole tail, so its journal is
+    as large as the data removed. Each `write_at` call fsyncs twice (journal, then data), which
+    costs throughput on streaming writes. Profiling is tracked under Phase 11.
+  - The journal does not defend against an attacker who can write to the vault folder. Such an
+    attacker can already replace files with older valid versions.
+  - Tests use `failpoint` to simulate a crash (journal left behind) and an ordinary error
+    (undone at once). They cover extend, shrink, error mid-write, listing, and stale journals.
 - **Memory.** Plaintext is zeroized in the file layer. Caller-supplied buffers and the OS
   pagefile are not covered. Page locking is platform-specific and is tracked under Phases 3
   and 4.

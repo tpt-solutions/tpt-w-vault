@@ -34,6 +34,7 @@ use crate::config::Slot;
 use crate::config::{CONFIG_FILE_NAME, KdfParams, VaultConfig};
 use crate::error::{Result, VaultError};
 use crate::file::{FileHandle, plaintext_len_for_disk};
+use crate::journal;
 use crate::keys::{DerivedKeys, MasterKey, random_bytes};
 use crate::names::{decrypt_segment, encrypt_segment};
 use crate::platform::PlatformKey;
@@ -254,6 +255,12 @@ impl FsVault {
     }
 
     /// Like `disk_path`, but refuses the root (for operations that need a real entry).
+    /// On-disk path of a vault entry. Used by tests that inspect or damage the raw bytes.
+    #[cfg(test)]
+    pub(crate) fn disk_file(&self, plain: &str) -> Result<PathBuf> {
+        self.disk_entry_path(plain)
+    }
+
     fn disk_entry_path(&self, plain: &str) -> Result<PathBuf> {
         if split_path(plain)?.is_empty() {
             return Err(VaultError::InvalidPath {
@@ -321,6 +328,8 @@ impl FsVault {
     }
 
     fn info_for(&self, plain_name: String, disk: &Path, plain_path: &str) -> Result<EntryInfo> {
+        // An interrupted write changes the length, so undo it before reading the length.
+        journal::recover(disk)?;
         let meta = fs::metadata(disk).map_err(|e| map_io(plain_path, e))?;
         if meta.is_dir() {
             Ok(EntryInfo {
@@ -432,6 +441,9 @@ impl VaultBackend for FsVault {
             if disk_name.starts_with(LONG_PREFIX) && disk_name.ends_with(SIDECAR_SUFFIX) {
                 continue;
             }
+            if journal::is_journal_name(disk_name) {
+                continue;
+            }
             let enc = if disk_name.starts_with(LONG_PREFIX) {
                 self.read_long_name(&disk, disk_name)?
             } else {
@@ -471,6 +483,8 @@ impl VaultBackend for FsVault {
         } else {
             fs::remove_file(&disk).map_err(|e| map_io(path, e))?;
         }
+        // The file is gone, so its journal has nothing left to apply to.
+        journal::discard(&disk)?;
         self.remove_sidecar(path)
     }
 
@@ -478,10 +492,14 @@ impl VaultBackend for FsVault {
         let from_disk = self.disk_entry_path(from)?;
         let to_disk = self.disk_entry_path(to)?;
         fs::metadata(&from_disk).map_err(|e| map_io(from, e))?;
+        // Undo any interrupted write first. Otherwise its journal would stay behind under the
+        // old name and never be applied.
+        journal::recover(&from_disk)?;
         // std::fs::rename silently replaces files on some platforms. Refuse instead.
         if to_disk.exists() {
             return Err(VaultError::AlreadyExists(to.to_owned()));
         }
+        journal::discard(&to_disk)?;
         self.write_sidecar(to)?;
         fs::rename(&from_disk, &to_disk).map_err(|e| map_io(to, e))?;
         self.remove_sidecar(from)
