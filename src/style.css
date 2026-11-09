@@ -351,8 +351,30 @@ button.snippet {
   overflow-wrap: anywhere;
 }
 
-.editor-preview[hidden],
-.editor-area[hidden] {
+.editor-panes {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.75rem;
+}
+
+/* Text and rendered note side by side when there is room. Stacked on narrow screens. */
+.editor-panes.split {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+
+.editor-panes.split .editor-preview {
+  height: 60vh;
+  min-height: 240px;
+  overflow-y: auto;
+}
+
+@media (max-width: 720px) {
+  .editor-panes.split {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.editor-preview[hidden] {
   display: none;
 }
 

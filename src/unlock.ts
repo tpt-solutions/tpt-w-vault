@@ -7,6 +7,8 @@ import { api, AppError, pickFolder } from "./api";
 import { el, mount, setStatus } from "./dom";
 
 const LAST_ROOT_KEY = "tpt-vault.lastRoot";
+const RECENT_ROOTS_KEY = "tpt-vault.recentRoots";
+const MAX_RECENT_ROOTS = 5;
 
 /** The vault folder remembered from the last session. A per-viewer convenience only. */
 function rememberedRoot(): string {
@@ -22,9 +24,21 @@ export function hasRememberedRoot(): boolean {
   return rememberedRoot() !== "";
 }
 
+/** Vault folders opened on this viewer, most recent first. A per-viewer convenience only. */
+function recentRoots(): string[] {
+  try {
+    const parsed: unknown = JSON.parse(localStorage.getItem(RECENT_ROOTS_KEY) ?? "[]");
+    return Array.isArray(parsed) ? parsed.filter((r): r is string => typeof r === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
 function remember(root: string): void {
   try {
     localStorage.setItem(LAST_ROOT_KEY, root);
+    const next = [root, ...recentRoots().filter((r) => r !== root)].slice(0, MAX_RECENT_ROOTS);
+    localStorage.setItem(RECENT_ROOTS_KEY, JSON.stringify(next));
   } catch {
     // Storage can be blocked. The field simply starts empty next time.
   }
@@ -66,6 +80,22 @@ export function renderUnlock(container: HTMLElement, opts: UnlockOptions): void 
     },
     "Browse…",
   );
+  // Picking a recent vault fills the folder field. Locking returns here, so this is how to switch.
+  const recent = recentRoots();
+  const recentSelect = el(
+    "select",
+    {
+      "aria-label": "Recent vaults",
+      hidden: recent.length === 0,
+      on: {
+        change: () => {
+          if (recentSelect.value) rootInput.value = recentSelect.value;
+        },
+      },
+    },
+    el("option", { value: "" }, "Recent vaults…"),
+    ...recent.map((r) => el("option", { value: r }, r)),
+  ) as HTMLSelectElement;
   const passInput = el("input", { id: "pass", type: "password", autocomplete: "current-password" });
   const confirmInput = el("input", { id: "confirm", type: "password", autocomplete: "new-password" });
   const codeInput = el("input", { id: "code", type: "text", autocomplete: "off", spellcheck: false });
@@ -173,6 +203,7 @@ export function renderUnlock(container: HTMLElement, opts: UnlockOptions): void 
   mount(
     form,
     el("label", {}, "Vault folder", el("div", { class: "row" }, rootInput, browseButton)),
+    recentSelect,
     el("label", {}, "Passphrase", passInput),
     el("label", {}, "Confirm passphrase", confirmInput),
     el("label", {}, "Recovery code (with hyphens or without)", codeInput),

@@ -11,6 +11,12 @@ import { renderSettings } from "./settings";
 export interface BrowserOptions {
   autoLockMinutes: number;
   platformSupported: boolean;
+  /** The key bytes could not be pinned in RAM, so they may reach the page file. */
+  keysLocked: boolean;
+  /** The vault has passed the soft write limit. Offer a key rebuild. */
+  rekeyRecommended: boolean;
+  /** The vault has passed the hard write limit. Saves are refused until the keys are rebuilt. */
+  writeLimitReached: boolean;
   onLocked: (reason: string) => void;
 }
 
@@ -49,6 +55,10 @@ export class Browser {
   private dir = "";
   private editor: NoteEditor | null = null;
   private readonly listArea = el("div", { class: "entries" });
+  private lastEntries: EntryDto[] = [];
+  private notesOnly = false;
+  private readonly notesButton: HTMLButtonElement;
+  private readonly budgetNotice: HTMLElement;
   private readonly editorArea = el("div", { class: "editor-host" });
   private readonly status = el("p", { class: "muted", role: "status" });
   private readonly pathLabel = el("nav", { class: "crumbs", "aria-label": "Current folder" });
@@ -85,6 +95,31 @@ export class Browser {
       void this.createNew();
     });
 
+    this.notesButton = el(
+      "button",
+      {
+        type: "button",
+        "aria-pressed": "false",
+        on: { click: () => this.toggleNotesOnly() },
+      },
+      "Notes only",
+    ) as HTMLButtonElement;
+
+    const notices: string[] = [];
+    if (opts.writeLimitReached) {
+      notices.push("This vault cannot take more saves until its keys are rebuilt. Open Settings and choose Rebuild vault keys.");
+    } else if (opts.rekeyRecommended) {
+      notices.push("This vault has been written to a lot. Rebuild its keys in Settings when convenient.");
+    }
+    if (!opts.keysLocked) {
+      notices.push("This computer would not pin the vault keys in memory, so they may be written to the page file. Lock the vault when you step away.");
+    }
+    this.budgetNotice = el(
+      "p",
+      { class: "notice", role: "status", hidden: notices.length === 0 },
+      notices.join(" "),
+    );
+
     this.node = el(
       "section",
       { class: "browser" },
@@ -103,6 +138,7 @@ export class Browser {
           "Lock",
         ),
       ),
+      this.budgetNotice,
       this.settings,
       this.editorArea,
       el(
@@ -122,6 +158,7 @@ export class Browser {
             { type: "button", on: { click: () => this.showNewForm("folder") } },
             "New folder",
           ),
+          this.notesButton,
         ),
         this.newForm,
         this.status,
@@ -207,8 +244,9 @@ export class Browser {
     this.renderCrumbs();
     try {
       const entries = await api.list(this.dir);
+      this.lastEntries = entries;
       this.renderEntries(entries);
-      setStatus(this.status, entries.length === 0 ? "This folder is empty." : "");
+      setStatus(this.status, this.folderStatus(entries));
     } catch (e) {
       mount(this.listArea);
       setStatus(this.status, messageFor(e), true);
@@ -234,8 +272,26 @@ export class Browser {
     const sorted = [...entries].sort((a, b) =>
       a.is_dir === b.is_dir ? a.name.localeCompare(b.name) : a.is_dir ? -1 : 1,
     );
-    const rows = sorted.map((entry) => this.renderRow(entry));
+    const rows = this.visible(sorted).map((entry) => this.renderRow(entry));
     mount(this.listArea, ...rows);
+  }
+
+  /** Notes-only keeps folders, so the user can still navigate to their notes. */
+  private visible(sorted: EntryDto[]): EntryDto[] {
+    return this.notesOnly ? sorted.filter((e) => e.is_dir || isNote(e.name)) : sorted;
+  }
+
+  private folderStatus(entries: EntryDto[]): string {
+    if (entries.length === 0) return "This folder is empty.";
+    if (this.notesOnly && this.visible(entries).length === 0) return "No notes in this folder.";
+    return "";
+  }
+
+  private toggleNotesOnly(): void {
+    this.notesOnly = !this.notesOnly;
+    this.notesButton.setAttribute("aria-pressed", String(this.notesOnly));
+    this.renderEntries(this.lastEntries);
+    setStatus(this.status, this.folderStatus(this.lastEntries));
   }
 
   private renderRow(entry: EntryDto): HTMLElement {
@@ -391,6 +447,8 @@ function messageFor(e: unknown): string {
         return "The vault is locked.";
       case "note_too_large":
         return "That note is too large to save.";
+      case "write_limit_reached":
+        return "This vault cannot take more saves until its keys are rebuilt. Open Settings and choose Rebuild vault keys.";
       default:
         return e.message;
     }

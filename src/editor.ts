@@ -9,6 +9,8 @@ import { el, mount, setStatus } from "./dom";
 import { renderMarkdown } from "./markdown";
 
 export const DEBOUNCE_MS = 1500;
+/** Pause after typing before the preview re-renders. */
+export const PREVIEW_DELAY_MS = 150;
 export const MAX_WAIT_MS = 10_000;
 
 /** Markdown snippets for the authoring toolbar. `{}` marks where the selected text goes. */
@@ -46,8 +48,10 @@ export class NoteEditor {
   private readonly area: HTMLTextAreaElement;
   private readonly status: HTMLElement;
   private readonly preview: HTMLElement;
+  private readonly panes: HTMLElement;
   private readonly previewButton: HTMLButtonElement;
-  private previewing = false;
+  private previewing = true;
+  private renderTimer: number | undefined;
   private debounceTimer: number | undefined;
   private maxWaitTimer: number | undefined;
   private dirty = false;
@@ -63,14 +67,19 @@ export class NoteEditor {
     this.area.value = text;
     this.status = el("span", { class: "muted", role: "status" });
     setStatus(this.status, "Saved");
-    this.preview = el("div", { class: "editor-preview", hidden: true, "aria-label": "Preview" });
+    this.preview = el("div", { class: "editor-preview", "aria-label": "Preview" });
+    this.panes = el("div", { class: "editor-panes" }, this.area, this.preview);
+    this.renderPreview();
 
-    this.area.addEventListener("input", () => this.edited());
+    this.area.addEventListener("input", () => {
+      this.edited();
+      this.schedulePreview();
+    });
 
     this.previewButton = el(
       "button",
-      { type: "button", "aria-pressed": "false", on: { click: () => this.togglePreview() } },
-      "Preview",
+      { type: "button", "aria-pressed": "true", on: { click: () => this.togglePreview() } },
+      "Hide preview",
     ) as HTMLButtonElement;
 
     const snippetButtons = (Object.keys(SNIPPETS) as SnippetName[]).map((name) =>
@@ -102,28 +111,40 @@ export class NoteEditor {
         this.previewButton,
         ...snippetButtons,
       ),
-      this.area,
-      this.preview,
+      this.panes,
     );
+    this.syncPanes();
     // The node is not in the page yet, so focus only works once the caller has inserted it.
     requestAnimationFrame(() => this.area.focus());
   }
 
+  /** Shows or hides the rendered pane beside the text. The text pane is always shown. */
   private togglePreview(): void {
     this.previewing = !this.previewing;
     this.previewButton.setAttribute("aria-pressed", String(this.previewing));
-    this.previewButton.textContent = this.previewing ? "Edit" : "Preview";
-    this.area.hidden = this.previewing;
+    this.previewButton.textContent = this.previewing ? "Hide preview" : "Show preview";
+    this.syncPanes();
+    if (this.previewing) this.renderPreview();
+    this.area.focus();
+  }
+
+  private syncPanes(): void {
+    this.panes.classList.toggle("split", this.previewing);
     this.preview.hidden = !this.previewing;
-    if (this.previewing) {
-      mount(this.preview, renderMarkdown(this.area.value));
-    } else {
-      this.area.focus();
-    }
+  }
+
+  /** Re-renders the preview after a short pause in typing, so long notes do not re-render per key. */
+  private schedulePreview(): void {
+    if (!this.previewing) return;
+    window.clearTimeout(this.renderTimer);
+    this.renderTimer = window.setTimeout(() => this.renderPreview(), PREVIEW_DELAY_MS);
+  }
+
+  private renderPreview(): void {
+    mount(this.preview, renderMarkdown(this.area.value));
   }
 
   private insert(name: SnippetName): void {
-    if (this.previewing) this.togglePreview();
     const value = this.area.value;
     const start = this.area.selectionStart ?? value.length;
     const end = this.area.selectionEnd ?? start;
@@ -133,6 +154,7 @@ export class NoteEditor {
     this.area.focus();
     // Setting the value does not fire `input`, so report the edit directly.
     this.edited();
+    this.schedulePreview();
   }
 
   private edited(): void {
@@ -184,6 +206,7 @@ export class NoteEditor {
   discard(): void {
     window.clearTimeout(this.debounceTimer);
     window.clearTimeout(this.maxWaitTimer);
+    window.clearTimeout(this.renderTimer);
     this.dirty = false;
   }
 

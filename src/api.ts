@@ -54,6 +54,9 @@ export interface VaultStatus {
   unlocked: boolean;
   root: string | null;
   auto_lock_minutes: number;
+  keys_locked: boolean;
+  rekey_recommended: boolean;
+  write_limit_reached: boolean;
 }
 
 export interface EntryDto {

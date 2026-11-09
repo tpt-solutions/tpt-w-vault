@@ -60,6 +60,9 @@ async function showBrowser(): Promise<void> {
   const status: VaultStatus = await api.status();
   browser = new Browser({
     autoLockMinutes: status.auto_lock_minutes,
+    keysLocked: status.keys_locked,
+    rekeyRecommended: status.rekey_recommended,
+    writeLimitReached: status.write_limit_reached,
     platformSupported: await platformSupported(),
     onLocked: (reason) => void showUnlock(reason),
   });
