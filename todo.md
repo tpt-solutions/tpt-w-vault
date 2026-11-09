@@ -55,9 +55,9 @@ Decisions locked in for this roadmap:
 | 4  | Linux Platform Integration                         | 🟡 In Progress (untested on Linux) |
 | 5  | Windows Mount Backend                              | ⛔ Blocked (WinFsp not installed; needs approval) |
 | 6  | Linux Mount Backend                                | 🟡 In Progress (adapter uncompiled; needs Linux) |
-| 7  | Secure Markdown Editor                             | ❌ Not Started |
-| 8  | Tauri Shell & IPC Layer                             | ❌ Not Started |
-| 9  | Frontend (Vault Browser / Editor / Settings)       | ❌ Not Started |
+| 7  | Secure Markdown Editor                             | 🟡 In Progress (core note storage, listing, autosave done; plain-text editor in UI, no preview) |
+| 8  | Tauri Shell & IPC Layer                             | 🟡 Built and tested (not yet run by hand; frontend is a placeholder) |
+| 9  | Frontend (Vault Browser / Editor / Settings)       | 🟡 In Progress (unlock, browser, editor, auto-lock done; wizard and most settings open) |
 | 10 | Archon Support (Real Page-Cache Integration)       | ❌ Not Started |
 | 11 | Performance & Polish                               | ❌ Not Started |
 | 12 | Testing & QA                                       | ❌ Not Started |
@@ -69,11 +69,11 @@ Decisions locked in for this roadmap:
 - [x] Init git repo, `.gitignore` (Rust + Node/Tauri targets + Windows/Linux build artifacts)
 - [x] Add `LICENSE-MIT` and `LICENSE-APACHE` (dual license, TPT Solutions copyright)
 - [x] Add SPDX dual-license header/notice convention for source files (see `CONTRIBUTING.md`)
-- [~] Cargo workspace: `core/`, `platform-windows/`, `platform-linux/`, `platform-archon/` done
-      (skeleton crates); `src/` (Vite) done; `src-tauri/` deferred to Phase 8; shared
+- [x] Cargo workspace: `core/`, `platform-windows/`, `platform-linux/`, `platform-archon/`
+      (skeleton crate), `src-tauri/` (Phase 8 app crate); `src/` (Vite) done; shared
       `[workspace.package]` done
 - [x] `rust-toolchain.toml` (MSRV pin), `rustfmt.toml`, `clippy.toml`
-- [ ] Configure `tauri.conf.json` (app id, window defaults, bundle identifiers) — Phase 8
+- [x] Configure `tauri.conf.json` (app id, window defaults, bundle identifiers) — Phase 8
 - [x] TypeScript config (tsconfig, Vite, no framework)
 - [x] `README.md` (from spec.txt), build instructions (license badges still to add)
 - [x] Set up CI (GitHub Actions, build+lint+test on Windows + Linux runners) — workflow file
@@ -104,9 +104,11 @@ Decisions locked in for this roadmap:
       verified `.name` sidecar (`core/src/fsvault.rs`). Plaintext segments up to 255 bytes work
 - [~] Nonce budget: policy written in `docs/crypto.md` (soft 2^31, hard 2^32 block writes per
       content key). Not enforced in code: the write count needs persisting per key
-- [ ] Crash consistency: an interrupted multi-block extend can leave the old last block
-      sealed as non-final, so the file reads as `Corrupt`. Needs a write-ahead journal (see
-      `docs/crypto.md`, "Known gaps")
+- [x] Crash consistency: writes that change existing records, and truncations, run under a
+      write-ahead journal (`core/src/journal.rs`). An interrupted write is undone on the next
+      open, stat, rename or remove. Tests simulate crashes and errors mid-write
+      (`journal::tests`). Limits: file creation is not journaled, and each write fsyncs twice
+      (see `docs/crypto.md`, "Known gaps")
 - [x] Zeroize plaintext buffers in the file layer (`Zeroizing<Vec<u8>>`). Caller buffers are
       not covered
 
@@ -182,32 +184,42 @@ Decisions locked in for this roadmap:
       recovery. Needs a Linux machine
 
 ## Phase 7 — Secure Markdown Editor
-- [ ] In-app markdown editor component (edit + live preview) operating directly on vault entries
-      (no plaintext temp files on disk)
-- [ ] Autosave into the vault format on a debounce interval, using Phase 1's streaming
-      encrypt/write path
-- [ ] Note list/browser view scoped to markdown files within the open vault
+- [~] In-app markdown editor component (edit + live preview) operating directly on vault entries
+      (no plaintext temp files on disk). Plain-text editor is in `src/editor.ts`; no live preview yet
+- [~] Autosave into the vault format on a debounce interval. `Autosave` timing (debounce plus
+      max-wait) and `save_note`/`load_note` are in `core/src/notes.rs`, going through the same
+      encrypted write path. Not done: wiring it to the editor and its timer
+- [~] Note list/browser view scoped to markdown files within the open vault. Core listing is
+      done (`notes::list_notes`, recursive, `.md` only, case-insensitive). The view is Phase 9
 - [ ] Basic markdown authoring features: headings, lists, code blocks, links, tables
-- [ ] Unit tests: autosave debounce correctness, no-plaintext-on-disk verification
+- [x] Unit tests: autosave debounce correctness (`notes.rs`), no-plaintext-on-disk verification
+      (`core/tests/notes.rs`)
 
 ## Phase 8 — Tauri Shell & IPC Layer
-- [ ] Tauri app scaffold wired to `core` (`VaultBackend`, key management)
-- [ ] Command layer: vault create/unlock/lock, file browser operations, editor save/load
-- [ ] Event push from Rust to frontend (mount status, lock timeout warnings)
-- [ ] System tray icon with quick actions (lock vault now, open vault)
-- [ ] Auto-lock on idle timeout (configurable)
-- [ ] IPC boundary tests (command validation, no arbitrary path escape outside the open vault)
+- [x] Tauri app scaffold wired to `core` (`VaultBackend`, key management) (`src-tauri/`)
+- [x] Command layer: vault create/unlock/lock, file browser operations, editor save/load
+      (`src-tauri/src/commands.rs`). Each command is a thin wrapper over a tested `*_impl`
+- [~] Event push from Rust to frontend. `vault-locked` and `lock-warning` are emitted. Mount
+      status is not pushed yet (Phase 5/6). Frontend listeners are Phase 9
+- [~] System tray icon with quick actions (lock vault now, open vault). Built into `main.rs`.
+      Not yet checked by clicking through it on the dev machine
+- [x] Auto-lock on idle timeout (configurable) (`state.rs`, with bounded values and tests)
+- [x] IPC boundary tests: invalid paths, NUL bytes, over-long paths, `../` traversal, and
+      locked-state refusal, all checked before the vault is touched (`commands.rs` tests)
 
 ## Phase 9 — Frontend (Vault Browser / Editor / Settings)
-- [ ] App shell (plain TS/HTML + Vite), light/dark theme
-- [ ] Unlock screen: passphrase entry, Windows Hello/biometric prompt trigger, recovery key entry
-- [ ] Vault browser: file/folder tree, create/rename/delete/move, drag-and-drop import of external
-      files into the vault
-- [ ] Markdown editor tab wired to Phase 7
-- [ ] Settings: auto-lock timeout, recovery key management, platform unlock method toggle,
-      vault location management (create/open additional vaults)
-- [ ] First-run vault creation wizard (explains what a vault is, in plain non-technical language,
-      per spec.txt's "less intimidating than VeraCrypt" goal)
+- [x] App shell (plain TS/HTML + Vite), light/dark theme (`src/style.css`, tokens on `:root`)
+- [x] Unlock screen: passphrase entry, Windows Hello trigger (shown when supported), recovery
+      code entry, and new-vault creation with a one-time recovery code screen (`src/unlock.ts`)
+- [~] Vault browser: folder navigation, create note/folder, rename, delete (two-step confirm),
+      lock button (`src/browser.ts`). Not done: move between folders, drag-and-drop import
+- [~] Markdown editor tab wired to Phase 7 (`src/editor.ts`): plain textarea with debounced
+      autosave and a visible save status. Not done: live preview, formatting toolbar
+- [~] Settings: auto-lock timeout only. Not done: recovery key rotation, passphrase change,
+      re-key, platform unlock toggle, and creating or opening additional vaults
+- [x] First-run vault creation wizard (explains what a vault is, in plain non-technical language,
+      per spec.txt's "less intimidating than VeraCrypt" goal). Shown on first run, from
+      `src/wizard.ts`. Folder picker is the native dialog (`tauri-plugin-dialog`)
 
 ## Phase 10 — Archon Support (Real Page-Cache Integration)
 - [ ] `platform-archon` crate implementing `VaultBackend` over `tpt-archon-bridge`'s
@@ -243,7 +255,9 @@ Decisions locked in for this roadmap:
 - [ ] Security review: crypto engine correctness (block cipher mode, nonce reuse avoidance, key
       zeroization), mount backend attack surface, IPC command validation, Archon capability
       boundary (no capability forgery/reuse across vaults)
-- [ ] Data-loss recovery test: forced crash mid-write, verify vault integrity/recoverable state
+- [~] Data-loss recovery test: forced crash mid-write, verify vault integrity/recoverable state.
+      Covered at the file layer with simulated crashes (`journal::tests`). Not yet a test of a
+      killed process, or of the Tauri app
 
 ## Phase 13 — Release v1
 - [ ] Finalize versioning scheme (SemVer) and changelog process
