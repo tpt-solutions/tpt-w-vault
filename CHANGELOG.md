@@ -21,6 +21,27 @@ change the vault format; see the notes for each release.
   off, and key rebuild.
 - Tray icon with lock action, and locking on idle, window close and quit.
 
+### Changed
+- Core: the write count per content key is enforced. Soft limit 2^31 block writes (re-key
+  recommended), hard limit 2^32 (writes refused until re-keyed). The count is stored in
+  `vault.conf` (`core/src/budget.rs`). Vaults made before this change start at zero.
+- Core: creating a file is atomic. The header is written to a temp file and hard-linked into
+  place, so a crash leaves no half-made entry.
+- Core and platform: key pages are pinned in RAM when the OS allows (`VirtualLock` on Windows,
+  `mlock` on Linux). The app warns when it cannot.
+- App: the unlock screen lists recent vault folders.
+- App: the browser has a "Notes only" filter.
+- App: the editor shows the text and a live preview side by side.
+- App: the status shows when the vault should be re-keyed or has reached its write limit.
+
+### Removed
+- Core: the unused `Autosave` timing type. The editor keeps the autosave timer.
+
+### Fixed
+- Writes no longer re-encrypt the rest of the file. A small write in a large file now costs the
+  same as in a small one (`docs/performance.md`).
+- Streaming writes use 1 MiB chunks instead of 64 KiB, which cuts the number of flushes.
+
 ### Known limitations
 - Mounting as a drive (WinFsp on Windows, FUSE on Linux) is not available yet.
 - Linux platform code is written but has not been run on a Linux session.

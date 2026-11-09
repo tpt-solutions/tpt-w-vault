@@ -16,7 +16,7 @@ Decisions locked in for this roadmap:
   file-level cloud sync tools.
 - **Content encryption**: AES-256-GCM per fixed-size block (4 KiB), nonce+tag stored inline per
   block, so partial-file reads/writes never require re-encrypting the whole file.
-- **Filename encryption**: AES-SIV (EME mode), deterministic so directory listings stay stable
+- **Filename encryption**: AES-SIV (RFC 5297), deterministic so directory listings stay stable
   without leaking plaintext names.
 - **Master key wrapping**: a `vault.conf`-style config file (gocryptfs-style) holding the
   scrypt-derived-key-wrapped master key; passphrase change re-wraps the master key without
@@ -42,6 +42,20 @@ Decisions locked in for this roadmap:
   hardware-backed crypto primitive upstream, feature-flagged so real Archon-native crypto can swap
   in later.
 
+Decisions made 2026-11-10:
+- **Platforms for v1**: Windows and Linux both ship. Linux is checked on GitHub Actions, not on a local Linux machine.
+- **Archon (Phase 10)**: deferred past v1.
+- **Drag-and-drop import (Phase 9)**: deferred past v1.
+- **WinFsp (Phase 5)**: approved for install on the dev machine. Mounting is in v1.
+- **Repository**: https://github.com/tpt-solutions/tpt-w-vault (origin).
+- **Nonce budget**: enforced in code. Limits and the stored counter are in `docs/crypto.md`.
+- **Filename cipher**: AES-SIV (RFC 5297). The roadmap has been updated to match.
+- **Windows key protection**: DPAPI, not CNG.
+- **Journal**: one journal per `write_at` is kept. The cost is measured in `docs/performance.md`.
+- **Vaults**: one open at a time, with a recent-vaults list on the unlock screen.
+- **Autosave timer**: lives in the editor. The unused core `Autosave` type was removed.
+- **Key memory**: keys are pinned in RAM when the OS allows (`VirtualLock` / `mlock`). The app warns when it cannot.
+
 ---
 
 ## Status Summary
@@ -50,16 +64,16 @@ Decisions locked in for this roadmap:
 |-------|------|----------|
 | 0  | Project Setup & Licensing                          | 🟡 In Progress (local items done) |
 | 1  | Core Vault Format & Crypto Engine                  | 🟡 In Progress (core implemented, tested) |
-| 2  | Key Management & Unlock Flows                      | 🟡 In Progress (re-key, mlock open) |
+| 2  | Key Management & Unlock Flows                      | 🟡 In Progress (key pages pinned; plaintext buffers open) |
 | 3  | Windows Platform Integration                       | 🟡 In Progress (Hello prompt unverified by hand) |
 | 4  | Linux Platform Integration                         | 🟡 In Progress (untested on Linux) |
-| 5  | Windows Mount Backend                              | ⛔ Blocked (WinFsp not installed; needs approval) |
-| 6  | Linux Mount Backend                                | 🟡 In Progress (adapter uncompiled; needs Linux) |
-| 7  | Secure Markdown Editor                             | 🟡 In Progress (core note storage, listing, autosave done; plain-text editor in UI, no preview) |
-| 8  | Tauri Shell & IPC Layer                             | 🟡 Built and tested (not yet run by hand; frontend is a placeholder) |
-| 9  | Frontend (Vault Browser / Editor / Settings)       | 🟡 In Progress (unlock, browser, editor, auto-lock done; wizard and most settings open) |
-| 10 | Archon Support (Real Page-Cache Integration)       | ❌ Not Started |
-| 11 | Performance & Polish                               | ❌ Not Started |
+| 5  | Windows Mount Backend                              | 🟡 WinFsp install approved; provider not written yet |
+| 6  | Linux Mount Backend                                | 🟡 In Progress (adapter not wired in; to be checked on CI) |
+| 7  | Secure Markdown Editor                             | ✅ Done (live preview, toolbar, notes-only filter) |
+| 8  | Tauri Shell & IPC Layer                             | 🟡 Built and tested (tray and lock flow not yet checked by hand) |
+| 9  | Frontend (Vault Browser / Editor / Settings)       | 🟡 In Progress (drag-and-drop deferred; vault management open) |
+| 10 | Archon Support (Real Page-Cache Integration)       | ⏸ Deferred past v1 |
+| 11 | Performance & Polish                               | 🟡 In Progress (crypto throughput profiled and fixed; see `docs/performance.md`) |
 | 12 | Testing & QA                                       | ❌ Not Started |
 | 13 | Release v1                                         | ❌ Not Started |
 
@@ -78,7 +92,7 @@ Decisions locked in for this roadmap:
 - [x] `README.md` (from spec.txt), build instructions (license badges still to add)
 - [x] Set up CI (GitHub Actions, build+lint+test on Windows + Linux runners) — workflow file
       added at `.github/workflows/ci.yml`; not yet run on GitHub
-- [ ] Repo hosting under `tpt-solutions` GitHub org
+- [x] Repo hosting under `tpt-solutions` GitHub org (https://github.com/tpt-solutions/tpt-w-vault)
 
 ## Phase 1 — Core Vault Format & Crypto Engine
 - [x] `vault.conf`-style config file format: scrypt KDF parameters, wrapped master key
@@ -87,8 +101,7 @@ Decisions locked in for this roadmap:
       nonce+tag, streaming encrypt/decrypt so large files never load fully into memory
       (`core/src/file.rs`, `core/src/block.rs`)
 - [x] Filename encryption: AES-SIV over path segments, base64url-safe encoding for on-disk
-      names. Deviation: AES-SIV in the `aes-siv` crate is SIV (RFC 5297), not EME mode.
-      Names over 175 bytes are rejected (no long-name files yet)
+      names. Deviation: AES-SIV in the `aes-siv` crate is SIV (RFC 5297), not EME mode. Kept.
 - [x] Directory structure mapping: encrypted vault tree mirrors plaintext tree shape.
       Decision: no per-directory IV file. SIV is deterministic and each segment is encrypted
       independently, so renames and moves need no re-encryption. Trade-off: equal names in
@@ -102,13 +115,14 @@ Decisions locked in for this roadmap:
       filename encryption collisions (`core/tests/vault.rs`, 22 integration tests)
 - [x] Long filenames: encrypted names over 255 bytes use hashed `longname.*` entries with a
       verified `.name` sidecar (`core/src/fsvault.rs`). Plaintext segments up to 255 bytes work
-- [~] Nonce budget: policy written in `docs/crypto.md` (soft 2^31, hard 2^32 block writes per
-      content key). Not enforced in code: the write count needs persisting per key
+- [x] Nonce budget: soft 2^31 and hard 2^32 block writes per content key, enforced in
+      `core/src/budget.rs`. The count is a ceiling stored in `vault.conf`, raised in 2^20 steps
+      (see `docs/crypto.md`)
 - [x] Crash consistency: writes that change existing records, and truncations, run under a
       write-ahead journal (`core/src/journal.rs`). An interrupted write is undone on the next
       open, stat, rename or remove. Tests simulate crashes and errors mid-write
-      (`journal::tests`). Limits: file creation is not journaled, and each write fsyncs twice
-      (see `docs/crypto.md`, "Known gaps")
+      (`journal::tests`). File creation is atomic (temp file, then hard link). Each write fsyncs
+      twice (see `docs/crypto.md`, "Known gaps"; cost in `docs/performance.md`)
 - [x] Zeroize plaintext buffers in the file layer (`Zeroizing<Vec<u8>>`). Caller buffers are
       not covered
 
@@ -124,7 +138,8 @@ Decisions locked in for this roadmap:
       checksum (`core/src/recovery.rs`). Wraps the master key via HKDF, independent of the
       passphrase. Rotatable with `rotate_recovery_code`
 - [~] Session key handling: the master key and subkeys are zeroized on drop, and `lock()` ends
-      the session. Not done: page locking (mlock/VirtualLock) to keep keys out of swap, and
+      the session. Key pages are pinned with VirtualLock / mlock when the OS allows
+      (`core/src/keys.rs`, `platform-*/src/memory.rs`). The app warns when it cannot. Not done:
       zeroizing transient plaintext buffers (tracked under Phase 1)
 - [x] Unit tests: passphrase change round-trip, recovery key round-trip (`core/tests/keys.rs`),
       wipe check (`keys.rs`). The wipe test calls the same zeroize as Drop, but it does not
@@ -159,8 +174,7 @@ Decisions locked in for this roadmap:
 
 ## Phase 5 — Windows Mount Backend
 - [ ] WinFsp integration (Rust bindings) implementing a filesystem provider backed by
-      `VaultBackend`. **Blocked:** WinFsp is not installed on the dev machine. Installing its
-      driver is a system change that needs your approval
+      `VaultBackend`. WinFsp install approved (2026-11-10). Provider not written yet.
 - [ ] Virtual drive letter assignment/lifecycle (mount on unlock, unmount on lock/app exit).
       Blocked on the same install
 - [~] Handle Windows-specific filesystem semantics. The shared inode layer
@@ -184,14 +198,18 @@ Decisions locked in for this roadmap:
       recovery. Needs a Linux machine
 
 ## Phase 7 — Secure Markdown Editor
-- [~] In-app markdown editor component (edit + live preview) operating directly on vault entries
-      (no plaintext temp files on disk). Plain-text editor is in `src/editor.ts`; no live preview yet
-- [~] Autosave into the vault format on a debounce interval. `Autosave` timing (debounce plus
-      max-wait) and `save_note`/`load_note` are in `core/src/notes.rs`, going through the same
-      encrypted write path. Not done: wiring it to the editor and its timer
-- [~] Note list/browser view scoped to markdown files within the open vault. Core listing is
-      done (`notes::list_notes`, recursive, `.md` only, case-insensitive). The view is Phase 9
-- [ ] Basic markdown authoring features: headings, lists, code blocks, links, tables
+- [x] In-app markdown editor component (edit + live preview) operating directly on vault entries
+      (no plaintext temp files on disk). `src/editor.ts` shows the text and a rendered preview side
+      by side, updated 150 ms after typing. The preview can be hidden. Stacks on narrow screens
+- [x] Autosave into the vault format on a debounce interval. The editor debounces saves
+      (`src/editor.ts`, same timing as `Autosave` in `core/src/notes.rs`), and each save goes
+      through `save_note` to the encrypted write path. The core `Autosave` type is not used by
+      the app; the timer lives in the editor
+- [x] Note list/browser view scoped to markdown files within the open vault. A "Notes only"
+      toggle in the browser shows `.md` notes and keeps folders visible. Default is all entries.
+      Core listing (`notes::list_notes`) exists but the browser does not call it yet
+- [x] Basic markdown authoring features: headings, lists, code blocks, links, tables. The editor
+      toolbar inserts each one (`src/editor.ts`), and the renderer in `src/markdown.ts` shows them
 - [x] Unit tests: autosave debounce correctness (`notes.rs`), no-plaintext-on-disk verification
       (`core/tests/notes.rs`)
 
@@ -199,8 +217,8 @@ Decisions locked in for this roadmap:
 - [x] Tauri app scaffold wired to `core` (`VaultBackend`, key management) (`src-tauri/`)
 - [x] Command layer: vault create/unlock/lock, file browser operations, editor save/load
       (`src-tauri/src/commands.rs`). Each command is a thin wrapper over a tested `*_impl`
-- [~] Event push from Rust to frontend. `vault-locked` and `lock-warning` are emitted. Mount
-      status is not pushed yet (Phase 5/6). Frontend listeners are Phase 9
+- [~] Event push from Rust to frontend. `vault-locked` and `lock-warning` are emitted, and the
+      frontend listens for both (`src/main.ts`). Mount status is not pushed yet (Phase 5/6)
 - [~] System tray icon with quick actions (lock vault now, open vault). Built into `main.rs`.
       Not yet checked by clicking through it on the dev machine
 - [x] Auto-lock on idle timeout (configurable) (`state.rs`, with bounded values and tests)
@@ -212,11 +230,13 @@ Decisions locked in for this roadmap:
 - [x] Unlock screen: passphrase entry, Windows Hello trigger (shown when supported), recovery
       code entry, and new-vault creation with a one-time recovery code screen (`src/unlock.ts`)
 - [~] Vault browser: folder navigation, create note/folder, rename, delete (two-step confirm),
-      lock button (`src/browser.ts`). Not done: move between folders, drag-and-drop import
-- [~] Markdown editor tab wired to Phase 7 (`src/editor.ts`): plain textarea with debounced
-      autosave and a visible save status. Not done: live preview, formatting toolbar
-- [~] Settings: auto-lock timeout only. Not done: recovery key rotation, passphrase change,
-      re-key, platform unlock toggle, and creating or opening additional vaults
+      lock button (`src/browser.ts`). Move works through the rename field, which takes a full
+      path. Drag-and-drop import is deferred past v1
+- [x] Markdown editor tab wired to Phase 7 (`src/editor.ts`): textarea with a formatting toolbar,
+      a live side-by-side preview, debounced autosave, and a visible save status
+- [~] Settings (`src/settings.ts`): auto-lock timeout, passphrase change, recovery code rotation,
+      Windows Hello on or off, and key rebuild. Recent vaults are listed on the unlock screen (one vault open
+      at a time). Not done: forgetting or renaming recent vaults
 - [x] First-run vault creation wizard (explains what a vault is, in plain non-technical language,
       per spec.txt's "less intimidating than VeraCrypt" goal). Shown on first run, from
       `src/wizard.ts`. Folder picker is the native dialog (`tauri-plugin-dialog`)
@@ -238,10 +258,13 @@ Decisions locked in for this roadmap:
       real Archon kernel required)
 
 ## Phase 11 — Performance & Polish
-- [ ] Profile crypto engine throughput (block encrypt/decrypt, streaming large-file performance)
+- [x] Profile crypto engine throughput (block encrypt/decrypt, streaming large-file performance).
+      Found and fixed: writes re-encrypted the rest of the file, and streaming chunks were 64 KiB.
+      Results in `docs/performance.md`. Journal flush cost measured and accepted there
 - [ ] App icon, branding assets (TPT Solutions)
 - [ ] First-run onboarding polish (vault creation wizard, unlock method setup)
-- [ ] Crash reporting / local error logging (opt-in only)
+- [ ] Crash reporting / local error logging (opt-in only). Not built yet. If built: local only,
+      off by default, and never note text, names or paths
 - [ ] Accessibility pass (keyboard navigation, screen reader labels across all views)
 
 ## Phase 12 — Testing & QA
@@ -260,7 +283,8 @@ Decisions locked in for this roadmap:
       killed process, or of the Tauri app
 
 ## Phase 13 — Release v1
-- [ ] Finalize versioning scheme (SemVer) and changelog process
+- [x] Finalize versioning scheme (SemVer) and changelog process (policy in the `CHANGELOG.md`
+      header; release steps still to write)
 - [ ] Windows installer (MSI/NSIS via Tauri bundler), WinFsp dependency bundling/detection
 - [ ] Linux packaging (.deb/.rpm/AppImage via Tauri bundler), documented FUSE/Secret
       Service/fprintd dependency requirements

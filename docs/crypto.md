@@ -65,15 +65,21 @@ the sidecar against the hash.
 
 Content nonces are random 96-bit values, one per block write. The birthday bound for random
 96-bit nonces under one key is about 2^32 writes, and collisions there are catastrophic for
-GCM. The limit below is a policy, not yet enforced in code:
+GCM. The limits below are enforced in code (`core/src/budget.rs`):
 
-- **Soft limit: 2^31 block writes per content key.** Above this, the UI should recommend a
-  re-key (`FsVault::rekey`).
-- **Hard limit: 2^32 block writes per content key.** The vault refuses further writes until
-  it is re-keyed.
+- **Soft limit: 2^31 block writes per content key.** The session reports `soft_reached`, and
+  the app recommends a re-key (`FsVault::rekey`, Settings > Rebuild vault keys).
+- **Hard limit: 2^32 block writes per content key.** Further writes fail with
+  `WriteLimitReached` until the vault is re-keyed. Reads still work.
 
-The write count per key must be persisted for enforcement. That is tracked as a follow-up in
-`todo.md`.
+The count is kept in `vault.conf` as a *ceiling*. The count never goes above the stored value.
+The ceiling is raised by 2^20 before writes pass it, and that update is synced first. A restart
+starts from the stored ceiling. So the count can be a little high after a restart (by up to one
+chunk) but never low, and a crash cannot reset the budget. Re-keying starts a new count. The
+count is per vault, shared by all files in the session.
+
+Vaults written before this counter existed have no ceiling, so they start at 0. No release has
+shipped with such vaults.
 
 ## Known gaps
 
@@ -85,14 +91,15 @@ The write count per key must be persisted for enforcement. That is tracked as a 
   that returns an error is undone at once. After a crash, the next open, stat, rename or remove
   of that file restores the saved bytes and the old length, so the file reads as it did before
   the interrupted write. A write that did not return is treated as not having happened.
-  - Limits: creating a file is not journaled. A crash during `create_file` can leave an empty
-    or torn file. A cut (`truncate` to a shorter length) saves the whole tail, so its journal is
-    as large as the data removed. Each `write_at` call fsyncs twice (journal, then data), which
-    costs throughput on streaming writes. Profiling is tracked under Phase 11.
+  - Creating a file is atomic. The header goes to a temp file, which is hard-linked into place,
+    so a crash leaves either no entry or a complete one. A cut (`truncate` to a shorter length)
+    saves the whole tail, so its journal is as large as the data removed. Each `write_at` call
+    fsyncs twice (journal, then data). The cost was measured and accepted; see `docs/performance.md`.
   - The journal does not defend against an attacker who can write to the vault folder. Such an
     attacker can already replace files with older valid versions.
   - Tests use `failpoint` to simulate a crash (journal left behind) and an ordinary error
     (undone at once). They cover extend, shrink, error mid-write, listing, and stale journals.
-- **Memory.** Plaintext is zeroized in the file layer. Caller-supplied buffers and the OS
-  pagefile are not covered. Page locking is platform-specific and is tracked under Phases 3
-  and 4.
+- **Memory.** Plaintext and key bytes are zeroized. Each key sits in its own page, which the
+  platform layer pins in RAM (`VirtualLock` on Windows, `mlock` on Linux) when it can. If the
+  OS refuses, the app reports `keys_locked = false`. Caller-supplied buffers are not covered.
+  Nothing stops the OS from paging out memory that was never pinned.

@@ -1,0 +1,4 @@
+# Normalize text files to LF in the repository and in every checkout.
+# rustfmt.toml sets newline_style = "Unix", so a CRLF checkout (for example
+# on Windows with core.autocrlf=true) fails `cargo fmt --check`.
+* text=auto eol=lf
