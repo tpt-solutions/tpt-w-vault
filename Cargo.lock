@@ -4153,6 +4153,7 @@ version = "0.1.0"
 name = "tpt-vault-platform-linux"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "tpt-vault-core",
  "zbus",
 ]

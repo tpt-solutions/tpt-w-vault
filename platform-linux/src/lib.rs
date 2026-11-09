@@ -12,9 +12,13 @@
 //! not yet been run against a live keyring or fingerprint reader. See the Phase 4 checklist.
 
 mod fprintd;
+#[cfg(unix)]
+mod memory;
 mod secret_service;
 
 pub use fprintd::FprintGate;
+#[cfg(unix)]
+pub use memory::{lock_pages, unlock_pages};
 pub use secret_service::SecretService;
 
 use tpt_vault_core::{ConsentGate, PlatformUnlock, Protector, Result};

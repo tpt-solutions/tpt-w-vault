@@ -12,10 +12,12 @@
 mod credman;
 mod dpapi;
 mod hello;
+mod memory;
 
 pub use credman::CredentialManager;
 pub use dpapi::Dpapi;
 pub use hello::WindowsHello;
+pub use memory::{lock_pages, unlock_pages};
 
 use tpt_vault_core::PlatformUnlock;
 
