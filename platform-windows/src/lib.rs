@@ -13,11 +13,13 @@ mod credman;
 mod dpapi;
 mod hello;
 mod memory;
+mod winfsp;
 
 pub use credman::CredentialManager;
 pub use dpapi::Dpapi;
 pub use hello::WindowsHello;
 pub use memory::{lock_pages, unlock_pages};
+pub use winfsp::{MountError, WinFspMount};
 
 use tpt_vault_core::PlatformUnlock;
 

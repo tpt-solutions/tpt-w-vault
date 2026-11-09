@@ -15,5 +15,9 @@ description = "tpt-vault: platform-windows crate"
 tpt-vault-core = { version = "0.1.0", path = "../core" }
 
 [target."cfg(windows)".dependencies]
-windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_Security_Credentials", "Win32_System_Com", "Security_Credentials_UI", "Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_WinRT", "Win32_System_Memory"] }
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_Security_Credentials", "Win32_System_Com", "Win32_System_Registry", "Security_Credentials_UI", "Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_WinRT", "Win32_System_Memory"] }
 windows-future = "0.2"
+libloading = "0.8"
+
+[dev-dependencies]
+tempfile = "3"
