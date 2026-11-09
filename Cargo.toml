@@ -18,3 +18,8 @@ rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 authors = ["TPT Solutions"]
 repository = "https://github.com/tpt-solutions/tpt-vault"
+
+# Dependencies are built without debug info. The windows crate otherwise overruns
+# the rustc stack during codegen on this machine. Our own crates keep full debug info.
+[profile.dev.package."*"]
+debug = false
