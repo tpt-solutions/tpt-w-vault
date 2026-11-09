@@ -12,11 +12,15 @@
 //! not yet been run against a live keyring or fingerprint reader. See the Phase 4 checklist.
 
 mod fprintd;
+#[cfg(target_os = "linux")]
+mod fuse;
 #[cfg(unix)]
 mod memory;
 mod secret_service;
 
 pub use fprintd::FprintGate;
+#[cfg(target_os = "linux")]
+pub use fuse::{FuseMount, serve};
 #[cfg(unix)]
 pub use memory::{lock_pages, unlock_pages};
 pub use secret_service::SecretService;

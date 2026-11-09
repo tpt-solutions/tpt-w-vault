@@ -3,24 +3,25 @@
 
 //! FUSE mount of an unlocked vault (Phase 6).
 //!
-//! NOT COMPILED YET. This file is not declared as a module, so cargo ignores it. To enable it,
-//! add `#[cfg(target_os = "linux")] mod fuse;` to `lib.rs`, and add `fuser` and `libc` as
-//! Linux-only dependencies. Do this only after it has built on a Linux machine, so the Linux CI
-//! job does not break.
+//! The mount runs on a background thread, so the app can keep using the vault and unmount it
+//! later. [`FuseMount`] starts it and unmounts it on drop.
 //!
 //! This is a thin adapter from `fuser` callbacks to [`tpt_vault_core::VaultTree`], which holds
 //! the inode logic and is tested on every platform. Only this file depends on FUSE.
 //!
-//! Status: type-checked against the Linux target from Windows. Not yet mounted on a Linux
-//! machine. The mount/unmount behaviour and crash cleanup are unverified.
+//! Verified by `examples/mount_selftest.rs` on a Linux kernel, in the CI Linux job.
 
 use std::ffi::OsStr;
-use std::path::Path;
-use std::time::{Duration, SystemTime};
+use std::io;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::Arc;
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant, SystemTime};
 
 use fuser::{
-    FileAttr, FileType, Filesystem, MountOption, ReplyAttr, ReplyCreate, ReplyData,
-    ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyWrite, Request,
+    FileAttr, FileType, Filesystem, MountOption, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory,
+    ReplyEmpty, ReplyEntry, ReplyOpen, ReplyWrite, Request,
 };
 use libc::{EEXIST, EINVAL, EIO, EISDIR, ENAMETOOLONG, ENOENT, ENOTDIR, ENOTEMPTY};
 use tpt_vault_core::{EntryInfo, EntryKind, FsVault, VaultError, VaultTree};
@@ -31,13 +32,13 @@ const TTL: Duration = Duration::from_secs(1);
 
 /// The FUSE filesystem for one unlocked vault.
 pub struct VaultFs {
-    tree: VaultTree<FsVault>,
+    tree: VaultTree<Arc<FsVault>>,
     uid: u32,
     gid: u32,
 }
 
 impl VaultFs {
-    pub fn new(vault: FsVault) -> Self {
+    pub fn new(vault: Arc<FsVault>) -> Self {
         // SAFETY: getuid and getgid are always safe to call and take no arguments.
         let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
         VaultFs {
@@ -136,10 +137,10 @@ impl Filesystem for VaultFs {
         reply: ReplyAttr,
     ) {
         // Only size changes are meaningful; mode, owner and times are fixed by the vault.
-        if let Some(new_size) = size
-            && let Err(e) = self.tree.truncate(ino, new_size)
-        {
-            return reply.error(errno(&e));
+        if let Some(new_size) = size {
+            if let Err(e) = self.tree.truncate(ino, new_size) {
+                return reply.error(errno(&e));
+            }
         }
         match self.attr_for(ino) {
             Ok(attr) => reply.attr(&TTL, &attr),
@@ -241,10 +242,7 @@ impl Filesystem for VaultFs {
         _lock_owner: Option<u64>,
         reply: ReplyData,
     ) {
-        match self
-            .tree
-            .read(ino, offset.max(0) as u64, size as usize)
-        {
+        match self.tree.read(ino, offset.max(0) as u64, size as usize) {
             Ok(data) => reply.data(&data),
             Err(e) => reply.error(errno(&e)),
         }
@@ -309,7 +307,14 @@ impl Filesystem for VaultFs {
         reply.ok();
     }
 
-    fn releasedir(&mut self, _req: &Request<'_>, _ino: u64, _fh: u64, _flags: i32, reply: ReplyEmpty) {
+    fn releasedir(
+        &mut self,
+        _req: &Request<'_>,
+        _ino: u64,
+        _fh: u64,
+        _flags: i32,
+        reply: ReplyEmpty,
+    ) {
         reply.ok();
     }
 
@@ -326,21 +331,35 @@ impl Filesystem for VaultFs {
         reply.ok();
     }
 
-    fn flush(&mut self, _req: &Request<'_>, _ino: u64, _fh: u64, _lock_owner: u64, reply: ReplyEmpty) {
+    fn flush(
+        &mut self,
+        _req: &Request<'_>,
+        _ino: u64,
+        _fh: u64,
+        _lock_owner: u64,
+        reply: ReplyEmpty,
+    ) {
         reply.ok();
     }
 
-    fn fsync(&mut self, _req: &Request<'_>, _ino: u64, _fh: u64, _datasync: bool, reply: ReplyEmpty) {
+    fn fsync(
+        &mut self,
+        _req: &Request<'_>,
+        _ino: u64,
+        _fh: u64,
+        _datasync: bool,
+        reply: ReplyEmpty,
+    ) {
         // Writes are already synced to disk when they complete, so there is nothing to flush.
         reply.ok();
     }
 }
 
-/// Mounts the vault at `mountpoint` and serves requests until unmounted.
+/// Serves `vault` at `mountpoint` until it is unmounted. Blocks the calling thread.
 ///
 /// `AutoUnmount` asks FUSE to unmount when this process exits, including after a crash, so a
 /// dead process does not leave a stale mount point behind.
-pub fn mount(vault: FsVault, mountpoint: impl AsRef<Path>) -> std::io::Result<()> {
+pub fn serve(vault: Arc<FsVault>, mountpoint: &Path) -> io::Result<()> {
     let options = [
         MountOption::FSName("tpt-vault".into()),
         MountOption::RW,
@@ -348,4 +367,101 @@ pub fn mount(vault: FsVault, mountpoint: impl AsRef<Path>) -> std::io::Result<()
         MountOption::DefaultPermissions,
     ];
     fuser::mount2(VaultFs::new(vault), mountpoint, &options)
+}
+
+/// Whether `mountpoint` is in the kernel's mount table.
+fn is_mounted(mountpoint: &Path) -> bool {
+    let Some(target) = mountpoint.to_str() else {
+        return false;
+    };
+    std::fs::read_to_string("/proc/self/mountinfo")
+        .unwrap_or_default()
+        .lines()
+        .any(|line| line.split(' ').nth(4) == Some(target))
+}
+
+/// A vault mounted in the background. Dropping it unmounts the vault. If the drop cannot unmount
+/// (for example because a file on the mount is still open), the mount stays up until the process
+/// exits, and `AutoUnmount` then removes it.
+pub struct FuseMount {
+    mountpoint: PathBuf,
+    thread: Option<JoinHandle<io::Result<()>>>,
+}
+
+impl FuseMount {
+    /// Mounts `vault` at `mountpoint`, which must be an empty directory. Returns once the mount
+    /// is listed in the kernel's mount table, or with the error that stopped it.
+    pub fn start(vault: Arc<FsVault>, mountpoint: PathBuf) -> io::Result<Self> {
+        let serving = mountpoint.clone();
+        let thread = thread::spawn(move || serve(vault, &serving));
+        let mut mount = FuseMount {
+            mountpoint,
+            thread: Some(thread),
+        };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if mount.thread.as_ref().is_some_and(|t| t.is_finished()) {
+                // The server ended before the mount came up. Its error is the answer.
+                let result = mount.thread.take().map(JoinHandle::join);
+                return Err(match result {
+                    Some(Ok(Err(e))) => e,
+                    _ => io::Error::other("the FUSE server stopped before the mount came up"),
+                });
+            }
+            if is_mounted(&mount.mountpoint) {
+                return Ok(mount);
+            }
+            if Instant::now() >= deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "the FUSE mount did not appear in time",
+                ));
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// Where the vault is mounted.
+    pub fn mountpoint(&self) -> &Path {
+        &self.mountpoint
+    }
+
+    /// Unmounts the vault and waits for the server to stop.
+    pub fn unmount(mut self) -> io::Result<()> {
+        self.unmount_in_place()
+    }
+
+    fn unmount_in_place(&mut self) -> io::Result<()> {
+        let Some(thread) = self.thread.take() else {
+            return Ok(());
+        };
+        // fusermount3 is the current helper; fusermount is the older name on some systems.
+        let attempt = |program: &str| {
+            Command::new(program)
+                .arg("-u")
+                .arg(&self.mountpoint)
+                .status()
+                .map(|s| s.success())
+        };
+        let unmounted =
+            matches!(attempt("fusermount3"), Ok(true)) || matches!(attempt("fusermount"), Ok(true));
+        if !unmounted {
+            // Put the thread back, so a later drop can try again.
+            self.thread = Some(thread);
+            return Err(io::Error::other(format!(
+                "could not unmount {}",
+                self.mountpoint.display()
+            )));
+        }
+        match thread.join() {
+            Ok(result) => result,
+            Err(_) => Err(io::Error::other("the FUSE server panicked")),
+        }
+    }
+}
+
+impl Drop for FuseMount {
+    fn drop(&mut self) {
+        let _ = self.unmount_in_place();
+    }
 }
