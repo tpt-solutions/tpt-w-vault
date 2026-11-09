@@ -63,6 +63,8 @@ async function showBrowser(): Promise<void> {
     keysLocked: status.keys_locked,
     rekeyRecommended: status.rekey_recommended,
     writeLimitReached: status.write_limit_reached,
+    mountedDrive: status.mounted_drive,
+    mountSupported: status.mount_supported,
     platformSupported: await platformSupported(),
     onLocked: (reason) => void showUnlock(reason),
   });

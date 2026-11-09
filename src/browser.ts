@@ -15,6 +15,10 @@ export interface BrowserOptions {
   keysLocked: boolean;
   /** The vault has passed the soft write limit. Offer a key rebuild. */
   rekeyRecommended: boolean;
+  /** Drive letter the vault is mounted on, or null. */
+  mountedDrive: string | null;
+  /** Whether this build can mount the vault as a drive. */
+  mountSupported: boolean;
   /** The vault has passed the hard write limit. Saves are refused until the keys are rebuilt. */
   writeLimitReached: boolean;
   onLocked: (reason: string) => void;
@@ -59,6 +63,9 @@ export class Browser {
   private notesOnly = false;
   private readonly notesButton: HTMLButtonElement;
   private readonly budgetNotice: HTMLElement;
+  private readonly driveLabel = el("span", { class: "muted", role: "status" });
+  private readonly driveButton: HTMLButtonElement;
+  private mountedDrive: string | null;
   private readonly editorArea = el("div", { class: "editor-host" });
   private readonly status = el("p", { class: "muted", role: "status" });
   private readonly pathLabel = el("nav", { class: "crumbs", "aria-label": "Current folder" });
@@ -105,6 +112,13 @@ export class Browser {
       "Notes only",
     ) as HTMLButtonElement;
 
+    this.mountedDrive = opts.mountedDrive;
+    this.driveButton = el(
+      "button",
+      { type: "button", on: { click: () => void this.toggleDrive() } },
+    ) as HTMLButtonElement;
+    this.showDrive();
+
     const notices: string[] = [];
     if (opts.writeLimitReached) {
       notices.push("This vault cannot take more saves until its keys are rebuilt. Open Settings and choose Rebuild vault keys.");
@@ -138,6 +152,7 @@ export class Browser {
           "Lock",
         ),
       ),
+      el("div", { class: "row drive", hidden: !opts.mountSupported }, this.driveLabel, this.driveButton),
       this.budgetNotice,
       this.settings,
       this.editorArea,
@@ -165,6 +180,37 @@ export class Browser {
         this.listArea,
       ),
     );
+  }
+
+  /** Shows whether the vault is mounted, and the button that changes that. */
+  private showDrive(): void {
+    if (this.mountedDrive) {
+      this.driveLabel.textContent = `Mounted as ${this.mountedDrive}:`;
+      this.driveButton.textContent = "Unmount drive";
+    } else {
+      this.driveLabel.textContent = "Not mounted as a drive";
+      this.driveButton.textContent = "Mount as drive";
+    }
+  }
+
+  private async toggleDrive(): Promise<void> {
+    this.driveButton.disabled = true;
+    try {
+      if (this.mountedDrive) {
+        await api.unmountDrive();
+        this.mountedDrive = null;
+      } else {
+        // An empty letter asks the app to pick the highest free one.
+        await api.mountDrive("");
+        this.mountedDrive = (await api.status()).mounted_drive;
+      }
+      setStatus(this.status, "");
+    } catch (e) {
+      setStatus(this.status, messageFor(e), true);
+    } finally {
+      this.driveButton.disabled = false;
+      this.showDrive();
+    }
   }
 
   /** Loads the root listing. Call once after unlock. */

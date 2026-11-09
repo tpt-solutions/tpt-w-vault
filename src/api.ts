@@ -57,6 +57,8 @@ export interface VaultStatus {
   keys_locked: boolean;
   rekey_recommended: boolean;
   write_limit_reached: boolean;
+  mounted_drive: string | null;
+  mount_supported: boolean;
 }
 
 export interface EntryDto {
@@ -85,6 +87,8 @@ export const api = {
   rename: (from: string, to: string) => call<void>("rename_entry", { from, to }),
   remove: (path: string) => call<void>("remove_entry", { path }),
   setAutoLock: (minutes: number) => call<void>("set_auto_lock_minutes", { minutes }),
+  mountDrive: (drive: string) => call<void>("mount_drive", { drive }),
+  unmountDrive: () => call<void>("unmount_drive"),
   changePassphrase: (oldPassphrase: string, newPassphrase: string) =>
     call<void>("change_passphrase", { oldPassphrase, newPassphrase }),
   rotateRecoveryCode: (passphrase: string) =>
