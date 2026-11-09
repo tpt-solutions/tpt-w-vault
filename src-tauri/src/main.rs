@@ -146,6 +146,8 @@ fn main() {
             commands::rotate_recovery_code,
             commands::rekey_vault,
             commands::set_auto_lock_minutes,
+            commands::mount_drive,
+            commands::unmount_drive,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tpt-vault");

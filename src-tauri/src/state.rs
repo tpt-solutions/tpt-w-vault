@@ -9,12 +9,23 @@
 
 use std::{
     path::PathBuf,
-    sync::{Mutex, MutexGuard},
+    sync::{Arc, Mutex, MutexGuard},
     time::{Duration, Instant},
 };
 
 use serde::Serialize;
 use tpt_vault_core::{FsVault, VaultError};
+
+/// A vault drive mounted for a session. Dropping it removes the drive. Only Windows has a mount
+/// backend (WinFsp) so far.
+#[cfg(windows)]
+pub type DriveMount = tpt_vault_platform_windows::WinFspMount;
+/// No mount backend on this platform.
+#[cfg(not(windows))]
+pub type DriveMount = std::convert::Infallible;
+
+/// Whether this build can mount a vault as a drive.
+pub const MOUNT_SUPPORTED: bool = cfg!(windows);
 
 /// Idle time before the vault locks automatically.
 pub const DEFAULT_AUTO_LOCK: Duration = Duration::from_secs(10 * 60);
@@ -74,10 +85,27 @@ impl From<VaultError> for AppError {
     }
 }
 
-/// The unlocked vault and where it lives.
+/// The unlocked vault, where it lives, and its drive mount if one is up.
+///
+/// The mount is declared before the vault, so it is dropped first. Dropping the session therefore
+/// removes the drive and then locks the vault.
 pub struct Session {
-    pub vault: FsVault,
+    pub mount: Option<DriveMount>,
+    /// Drive letter of the mount, for display.
+    pub drive: Option<char>,
+    pub vault: Arc<FsVault>,
     pub root: PathBuf,
+}
+
+impl Session {
+    pub fn new(vault: FsVault, root: PathBuf) -> Self {
+        Session {
+            mount: None,
+            drive: None,
+            vault: Arc::new(vault),
+            root,
+        }
+    }
 }
 
 /// Shared app state, managed by Tauri.
@@ -144,6 +172,50 @@ impl AppState {
         lock_or_recover(&self.session).take()
     }
 
+    /// Mounts the open vault as drive `drive`. Fails if no vault is open, if a drive is already up,
+    /// or if this platform has no mount backend.
+    #[cfg(windows)]
+    pub fn mount_drive(&self, drive: char) -> Result<(), AppError> {
+        let mut guard = lock_or_recover(&self.session);
+        let session = guard.as_mut().ok_or_else(AppError::locked)?;
+        if session.mount.is_some() {
+            return Err(AppError::new(
+                "already_mounted",
+                "the vault is already mounted as a drive",
+            ));
+        }
+        let mount = DriveMount::mount(Arc::clone(&session.vault), drive)
+            .map_err(|e| AppError::new("mount_failed", e.to_string()))?;
+        session.mount = Some(mount);
+        session.drive = Some(drive.to_ascii_uppercase());
+        Ok(())
+    }
+
+    /// Mounts the open vault as drive `drive`. This platform has no mount backend.
+    #[cfg(not(windows))]
+    pub fn mount_drive(&self, _drive: char) -> Result<(), AppError> {
+        Err(AppError::new(
+            "unsupported",
+            "mounting as a drive is not available on this platform",
+        ))
+    }
+
+    /// Removes the drive, if one is mounted. The vault stays open.
+    pub fn unmount_drive(&self) {
+        let mut guard = lock_or_recover(&self.session);
+        if let Some(session) = guard.as_mut() {
+            session.mount = None;
+            session.drive = None;
+        }
+    }
+
+    /// Drive letter of the mounted vault, if one is mounted.
+    pub fn mounted_drive(&self) -> Option<char> {
+        lock_or_recover(&self.session)
+            .as_ref()
+            .and_then(|s| s.drive)
+    }
+
     /// Whether the open vault's key bytes are pinned in RAM. False when no vault is open.
     pub fn keys_locked(&self) -> bool {
         lock_or_recover(&self.session)
@@ -206,6 +278,13 @@ impl AppState {
 }
 
 /// Rejects paths that are too long or contain NUL. Structure is checked by the core.
+/// The highest free drive letter, counting down from Z. None if every letter is taken.
+pub fn free_drive_letter() -> Option<char> {
+    ('D'..='Z')
+        .rev()
+        .find(|c| !std::path::Path::new(&format!("{c}:\\")).exists())
+}
+
 pub fn validate_path(path: &str) -> Result<(), AppError> {
     if path.len() > MAX_PATH_BYTES {
         return Err(AppError::new("invalid_path", "path is too long"));
@@ -313,10 +392,7 @@ mod tests {
             p: 1,
         };
         let (vault, _code) = FsVault::create(dir.path(), b"passphrase-1", params).unwrap();
-        state.install(Session {
-            vault,
-            root: dir.path().to_path_buf(),
-        });
+        state.install(Session::new(vault, dir.path().to_path_buf()));
         state.set_auto_lock(Duration::from_secs(120));
 
         // Not yet inside the warning window: idle is about zero.

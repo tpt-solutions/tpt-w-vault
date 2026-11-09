@@ -6,7 +6,7 @@
 //! Each command is a thin wrapper around an `*_impl` function that takes `&AppState`. The
 //! wrappers handle Tauri types, and the `*_impl` functions hold the logic and the tests.
 
-use std::{path::PathBuf, time::Duration};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use serde::Serialize;
 use tauri::{State, WebviewWindow};
@@ -14,8 +14,8 @@ use tpt_vault_core::{EntryKind, FsVault, KdfParams, VaultBackend, notes};
 
 use crate::platform;
 use crate::state::{
-    AppError, AppState, Session, validate_auto_lock_minutes, validate_new_passphrase,
-    validate_note_size, validate_path,
+    AppError, AppState, MOUNT_SUPPORTED, Session, free_drive_letter, validate_auto_lock_minutes,
+    validate_new_passphrase, validate_note_size, validate_path,
 };
 
 /// KDF cost for new vaults and passphrase changes. Tests use a cheap setting.
@@ -45,6 +45,10 @@ pub struct VaultStatus {
     pub rekey_recommended: bool,
     /// The vault has passed the hard write limit. Saves fail until the keys are rebuilt.
     pub write_limit_reached: bool,
+    /// Drive letter the vault is mounted on, if it is mounted.
+    pub mounted_drive: Option<String>,
+    /// Whether this build can mount the vault as a drive.
+    pub mount_supported: bool,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -76,6 +80,8 @@ pub fn status_impl(state: &AppState) -> VaultStatus {
         keys_locked: state.keys_locked(),
         rekey_recommended: budget.is_some_and(|b| b.soft_reached),
         write_limit_reached: budget.is_some_and(|b| b.hard_reached),
+        mounted_drive: state.mounted_drive().map(|c| c.to_string()),
+        mount_supported: MOUNT_SUPPORTED,
     }
 }
 
@@ -89,21 +95,21 @@ pub fn create_vault_impl(
     validate_new_passphrase(passphrase)?;
     let (vault, code) = FsVault::create(&root, passphrase.as_bytes(), kdf_for_new_vaults())
         .map_err(AppError::from)?;
-    state.install(Session { vault, root });
+    state.install(Session::new(vault, root));
     Ok(code.to_string())
 }
 
 pub fn unlock_vault_impl(state: &AppState, root: &str, passphrase: &str) -> Result<(), AppError> {
     let root = root_of(root)?;
     let vault = FsVault::open(&root, passphrase.as_bytes()).map_err(AppError::from)?;
-    state.install(Session { vault, root });
+    state.install(Session::new(vault, root));
     Ok(())
 }
 
 pub fn unlock_recovery_impl(state: &AppState, root: &str, code: &str) -> Result<(), AppError> {
     let root = root_of(root)?;
     let vault = FsVault::open_with_recovery(&root, code).map_err(AppError::from)?;
-    state.install(Session { vault, root });
+    state.install(Session::new(vault, root));
     Ok(())
 }
 
@@ -171,12 +177,63 @@ pub fn rotate_recovery_impl(state: &AppState, passphrase: &str) -> Result<String
 /// Returns the new recovery code.
 pub fn rekey_impl(state: &AppState, passphrase: &str) -> Result<String, AppError> {
     validate_new_passphrase(passphrase)?;
-    let Session { vault, root } = state.take_session().ok_or_else(AppError::locked)?;
+    let session = state.take_session().ok_or_else(AppError::locked)?;
+    // The drive holds a reference to the vault, so it comes down before the vault is rebuilt.
+    // It is not mounted again afterwards.
+    let Session {
+        mount, vault, root, ..
+    } = session;
+    drop(mount);
+    let vault = Arc::try_unwrap(vault)
+        .map_err(|_| AppError::new("busy", "the vault is still in use; try again"))?;
     let (vault, code) = vault
         .rekey(passphrase.as_bytes(), kdf_for_new_vaults())
         .map_err(AppError::from)?;
-    state.install(Session { vault, root });
+    state.install(Session::new(vault, root));
     Ok(code.to_string())
+}
+
+// --- drive mount ---------------------------------------------------------------
+
+/// Mounts the open vault as a drive. An empty `drive` picks the highest free letter. Otherwise
+/// `drive` must be one letter.
+pub fn mount_drive_impl(state: &AppState, drive: &str) -> Result<(), AppError> {
+    let letter = if drive.is_empty() {
+        free_drive_letter()
+            .ok_or_else(|| AppError::new("no_drive_letter", "no drive letter is free"))?
+    } else {
+        let mut chars = drive.chars();
+        match (chars.next(), chars.next()) {
+            (Some(c), None) if c.is_ascii_alphabetic() => c,
+            _ => return Err(AppError::new("invalid_drive", "use a single drive letter")),
+        }
+    };
+    state.mount_drive(letter)
+}
+
+pub fn unmount_drive_impl(state: &AppState) {
+    state.unmount_drive();
+}
+
+/// Mounts a freshly unlocked vault on the highest free drive letter. This is best effort: a
+/// missing WinFsp or a full set of letters leaves the vault open without a drive.
+fn auto_mount(state: &AppState) {
+    if !MOUNT_SUPPORTED {
+        return;
+    }
+    if let Some(letter) = free_drive_letter() {
+        let _ = state.mount_drive(letter);
+    }
+}
+
+#[tauri::command]
+pub fn mount_drive(state: State<'_, AppState>, drive: String) -> Result<(), AppError> {
+    mount_drive_impl(&state, &drive)
+}
+
+#[tauri::command]
+pub fn unmount_drive(state: State<'_, AppState>) {
+    unmount_drive_impl(&state);
 }
 
 pub fn set_auto_lock_impl(state: &AppState, minutes: u32) -> Result<(), AppError> {
@@ -198,7 +255,9 @@ pub fn create_vault(
     root: String,
     passphrase: String,
 ) -> Result<String, AppError> {
-    create_vault_impl(&state, &root, &passphrase)
+    let code = create_vault_impl(&state, &root, &passphrase)?;
+    auto_mount(&state);
+    Ok(code)
 }
 
 #[tauri::command]
@@ -207,7 +266,9 @@ pub fn unlock_vault(
     root: String,
     passphrase: String,
 ) -> Result<(), AppError> {
-    unlock_vault_impl(&state, &root, &passphrase)
+    unlock_vault_impl(&state, &root, &passphrase)?;
+    auto_mount(&state);
+    Ok(())
 }
 
 #[tauri::command]
@@ -216,7 +277,9 @@ pub fn unlock_with_recovery(
     root: String,
     code: String,
 ) -> Result<(), AppError> {
-    unlock_recovery_impl(&state, &root, &code)
+    unlock_recovery_impl(&state, &root, &code)?;
+    auto_mount(&state);
+    Ok(())
 }
 
 /// Unlocks with the platform key after the consent check. Runs off the main thread, since the
@@ -233,10 +296,8 @@ pub async fn unlock_with_platform(
         .await
         .map_err(|e| AppError::new("internal", e.to_string()))??;
     let vault = FsVault::open_with_platform_key(&root_path, &key).map_err(AppError::from)?;
-    state.install(Session {
-        vault,
-        root: root_path,
-    });
+    state.install(Session::new(vault, root_path));
+    auto_mount(&state);
     Ok(())
 }
 
