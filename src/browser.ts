@@ -185,11 +185,11 @@ export class Browser {
   /** Shows whether the vault is mounted, and the button that changes that. */
   private showDrive(): void {
     if (this.mountedDrive) {
-      this.driveLabel.textContent = `Mounted as ${this.mountedDrive}:`;
-      this.driveButton.textContent = "Unmount drive";
+      this.driveLabel.textContent = `Mounted at ${this.mountedDrive}`;
+      this.driveButton.textContent = "Unmount";
     } else {
-      this.driveLabel.textContent = "Not mounted as a drive";
-      this.driveButton.textContent = "Mount as drive";
+      this.driveLabel.textContent = "Not mounted";
+      this.driveButton.textContent = "Mount vault";
     }
   }
 

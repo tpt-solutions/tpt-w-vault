@@ -16,16 +16,45 @@ use std::{
 use serde::Serialize;
 use tpt_vault_core::{FsVault, VaultError};
 
-/// A vault drive mounted for a session. Dropping it removes the drive. Only Windows has a mount
-/// backend (WinFsp) so far.
+/// A vault mounted for a session. Dropping it removes the mount. Windows mounts with WinFsp
+/// (a drive letter), and Linux mounts with FUSE (a folder).
 #[cfg(windows)]
 pub type DriveMount = tpt_vault_platform_windows::WinFspMount;
-/// No mount backend on this platform.
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+pub type DriveMount = tpt_vault_platform_linux::FuseMount;
+#[cfg(not(any(windows, target_os = "linux")))]
 pub type DriveMount = std::convert::Infallible;
 
-/// Whether this build can mount a vault as a drive.
-pub const MOUNT_SUPPORTED: bool = cfg!(windows);
+/// Where a mount goes: a drive letter on Windows, a folder on Linux.
+#[cfg(windows)]
+pub type MountTarget = char;
+#[cfg(target_os = "linux")]
+pub type MountTarget = std::path::PathBuf;
+#[cfg(not(any(windows, target_os = "linux")))]
+pub type MountTarget = ();
+
+/// Whether this build can mount a vault.
+pub const MOUNT_SUPPORTED: bool = cfg!(any(windows, target_os = "linux"));
+
+/// Where new mounts go by default: the highest free drive letter on Windows, and a `tpt-vault`
+/// folder in the home directory on Linux. None if there is no place to mount.
+#[cfg(windows)]
+pub fn default_mount_target() -> Option<MountTarget> {
+    free_drive_letter()
+}
+
+#[cfg(target_os = "linux")]
+pub fn default_mount_target() -> Option<MountTarget> {
+    let home = std::env::var_os("HOME")?;
+    let dir = std::path::PathBuf::from(home).join("tpt-vault");
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir)
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+pub fn default_mount_target() -> Option<MountTarget> {
+    None
+}
 
 /// Idle time before the vault locks automatically.
 pub const DEFAULT_AUTO_LOCK: Duration = Duration::from_secs(10 * 60);
@@ -92,7 +121,8 @@ impl From<VaultError> for AppError {
 pub struct Session {
     pub mount: Option<DriveMount>,
     /// Drive letter of the mount, for display.
-    pub drive: Option<char>,
+    /// Where the vault is mounted, for display: a drive such as "V:" or a folder path.
+    pub label: Option<String>,
     pub vault: Arc<FsVault>,
     pub root: PathBuf,
 }
@@ -101,7 +131,7 @@ impl Session {
     pub fn new(vault: FsVault, root: PathBuf) -> Self {
         Session {
             mount: None,
-            drive: None,
+            label: None,
             vault: Arc::new(vault),
             root,
         }
@@ -172,48 +202,37 @@ impl AppState {
         lock_or_recover(&self.session).take()
     }
 
-    /// Mounts the open vault as drive `drive`. Fails if no vault is open, if a drive is already up,
-    /// or if this platform has no mount backend.
-    #[cfg(windows)]
-    pub fn mount_drive(&self, drive: char) -> Result<(), AppError> {
+    /// Mounts the open vault at `target`. Fails if no vault is open, if it is already mounted,
+    /// or if the mount cannot be made.
+    pub fn mount_drive(&self, target: MountTarget) -> Result<(), AppError> {
         let mut guard = lock_or_recover(&self.session);
         let session = guard.as_mut().ok_or_else(AppError::locked)?;
         if session.mount.is_some() {
             return Err(AppError::new(
                 "already_mounted",
-                "the vault is already mounted as a drive",
+                "the vault is already mounted",
             ));
         }
-        let mount = DriveMount::mount(Arc::clone(&session.vault), drive)
-            .map_err(|e| AppError::new("mount_failed", e.to_string()))?;
+        let (mount, label) = start_mount(Arc::clone(&session.vault), target)?;
         session.mount = Some(mount);
-        session.drive = Some(drive.to_ascii_uppercase());
+        session.label = Some(label);
         Ok(())
     }
 
-    /// Mounts the open vault as drive `drive`. This platform has no mount backend.
-    #[cfg(not(windows))]
-    pub fn mount_drive(&self, _drive: char) -> Result<(), AppError> {
-        Err(AppError::new(
-            "unsupported",
-            "mounting as a drive is not available on this platform",
-        ))
-    }
-
-    /// Removes the drive, if one is mounted. The vault stays open.
+    /// Removes the mount, if there is one. The vault stays open.
     pub fn unmount_drive(&self) {
         let mut guard = lock_or_recover(&self.session);
         if let Some(session) = guard.as_mut() {
             session.mount = None;
-            session.drive = None;
+            session.label = None;
         }
     }
 
-    /// Drive letter of the mounted vault, if one is mounted.
-    pub fn mounted_drive(&self) -> Option<char> {
+    /// Where the open vault is mounted, if it is mounted.
+    pub fn mounted_drive(&self) -> Option<String> {
         lock_or_recover(&self.session)
             .as_ref()
-            .and_then(|s| s.drive)
+            .and_then(|s| s.label.clone())
     }
 
     /// Whether the open vault's key bytes are pinned in RAM. False when no vault is open.
@@ -279,10 +298,40 @@ impl AppState {
 
 /// Rejects paths that are too long or contain NUL. Structure is checked by the core.
 /// The highest free drive letter, counting down from Z. None if every letter is taken.
+#[cfg(windows)]
 pub fn free_drive_letter() -> Option<char> {
     ('D'..='Z')
         .rev()
         .find(|c| !std::path::Path::new(&format!("{c}:\\")).exists())
+}
+
+/// Starts a mount on Windows (WinFsp). The label is the drive letter.
+#[cfg(windows)]
+fn start_mount(vault: Arc<FsVault>, letter: MountTarget) -> Result<(DriveMount, String), AppError> {
+    let mount = DriveMount::mount(vault, letter)
+        .map_err(|e| AppError::new("mount_failed", e.to_string()))?;
+    Ok((mount, format!("{}:", letter.to_ascii_uppercase())))
+}
+
+/// Starts a mount on Linux (FUSE). The label is the folder.
+#[cfg(target_os = "linux")]
+fn start_mount(vault: Arc<FsVault>, dir: MountTarget) -> Result<(DriveMount, String), AppError> {
+    let label = dir.display().to_string();
+    let mount =
+        DriveMount::start(vault, dir).map_err(|e| AppError::new("mount_failed", e.to_string()))?;
+    Ok((mount, label))
+}
+
+/// No mount backend on this platform.
+#[cfg(not(any(windows, target_os = "linux")))]
+fn start_mount(
+    _vault: Arc<FsVault>,
+    _target: MountTarget,
+) -> Result<(DriveMount, String), AppError> {
+    Err(AppError::new(
+        "unsupported",
+        "mounting is not available on this platform",
+    ))
 }
 
 pub fn validate_path(path: &str) -> Result<(), AppError> {

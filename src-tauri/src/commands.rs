@@ -14,8 +14,8 @@ use tpt_vault_core::{EntryKind, FsVault, KdfParams, VaultBackend, notes};
 
 use crate::platform;
 use crate::state::{
-    AppError, AppState, MOUNT_SUPPORTED, Session, free_drive_letter, validate_auto_lock_minutes,
-    validate_new_passphrase, validate_note_size, validate_path,
+    AppError, AppState, MOUNT_SUPPORTED, MountTarget, Session, default_mount_target,
+    validate_auto_lock_minutes, validate_new_passphrase, validate_note_size, validate_path,
 };
 
 /// KDF cost for new vaults and passphrase changes. Tests use a cheap setting.
@@ -45,7 +45,7 @@ pub struct VaultStatus {
     pub rekey_recommended: bool,
     /// The vault has passed the hard write limit. Saves fail until the keys are rebuilt.
     pub write_limit_reached: bool,
-    /// Drive letter the vault is mounted on, if it is mounted.
+    /// Where the vault is mounted, if it is: a drive such as "V:" or a folder path.
     pub mounted_drive: Option<String>,
     /// Whether this build can mount the vault as a drive.
     pub mount_supported: bool,
@@ -80,7 +80,7 @@ pub fn status_impl(state: &AppState) -> VaultStatus {
         keys_locked: state.keys_locked(),
         rekey_recommended: budget.is_some_and(|b| b.soft_reached),
         write_limit_reached: budget.is_some_and(|b| b.hard_reached),
-        mounted_drive: state.mounted_drive().map(|c| c.to_string()),
+        mounted_drive: state.mounted_drive(),
         mount_supported: MOUNT_SUPPORTED,
     }
 }
@@ -183,7 +183,10 @@ pub fn rekey_impl(state: &AppState, passphrase: &str) -> Result<String, AppError
     let Session {
         mount, vault, root, ..
     } = session;
-    drop(mount);
+    {
+        // Ends this scope, which removes the drive.
+        let _mount = mount;
+    }
     let vault = Arc::try_unwrap(vault)
         .map_err(|_| AppError::new("busy", "the vault is still in use; try again"))?;
     let (vault, code) = vault
@@ -195,34 +198,53 @@ pub fn rekey_impl(state: &AppState, passphrase: &str) -> Result<String, AppError
 
 // --- drive mount ---------------------------------------------------------------
 
-/// Mounts the open vault as a drive. An empty `drive` picks the highest free letter. Otherwise
-/// `drive` must be one letter.
+/// Mounts the open vault. An empty `drive` picks the default place: the highest free drive letter
+/// on Windows, or a folder in the home directory on Linux.
 pub fn mount_drive_impl(state: &AppState, drive: &str) -> Result<(), AppError> {
-    let letter = if drive.is_empty() {
-        free_drive_letter()
-            .ok_or_else(|| AppError::new("no_drive_letter", "no drive letter is free"))?
+    let target = if drive.is_empty() {
+        default_mount_target().ok_or_else(|| {
+            AppError::new(
+                "no_mount_target",
+                "there is no free place to mount the vault",
+            )
+        })?
     } else {
-        let mut chars = drive.chars();
-        match (chars.next(), chars.next()) {
-            (Some(c), None) if c.is_ascii_alphabetic() => c,
-            _ => return Err(AppError::new("invalid_drive", "use a single drive letter")),
-        }
+        parse_target(drive)?
     };
-    state.mount_drive(letter)
+    state.mount_drive(target)
+}
+
+/// Reads a drive letter sent by the frontend. Only Windows takes a letter.
+#[cfg(windows)]
+fn parse_target(drive: &str) -> Result<MountTarget, AppError> {
+    let mut chars = drive.chars();
+    match (chars.next(), chars.next()) {
+        (Some(c), None) if c.is_ascii_alphabetic() => Ok(c),
+        _ => Err(AppError::new("invalid_drive", "use a single drive letter")),
+    }
+}
+
+/// Other platforms mount at their default place only.
+#[cfg(not(windows))]
+fn parse_target(_drive: &str) -> Result<MountTarget, AppError> {
+    Err(AppError::new(
+        "invalid_drive",
+        "this platform mounts at its default place only",
+    ))
 }
 
 pub fn unmount_drive_impl(state: &AppState) {
     state.unmount_drive();
 }
 
-/// Mounts a freshly unlocked vault on the highest free drive letter. This is best effort: a
-/// missing WinFsp or a full set of letters leaves the vault open without a drive.
+/// Mounts a freshly unlocked vault at the default place. This is best effort: a missing mount
+/// backend, or a place that is taken, leaves the vault open without a mount.
 fn auto_mount(state: &AppState) {
     if !MOUNT_SUPPORTED {
         return;
     }
-    if let Some(letter) = free_drive_letter() {
-        let _ = state.mount_drive(letter);
+    if let Some(target) = default_mount_target() {
+        let _ = state.mount_drive(target);
     }
 }
 
