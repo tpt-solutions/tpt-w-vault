@@ -94,7 +94,22 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
+/// Gives core the platform's way of pinning key pages in RAM. Core cannot call the OS itself.
+fn install_page_locker() {
+    #[cfg(windows)]
+    tpt_vault_core::install_page_locker(tpt_vault_core::PageLocker {
+        lock: tpt_vault_platform_windows::lock_pages,
+        unlock: tpt_vault_platform_windows::unlock_pages,
+    });
+    #[cfg(target_os = "linux")]
+    tpt_vault_core::install_page_locker(tpt_vault_core::PageLocker {
+        lock: tpt_vault_platform_linux::lock_pages,
+        unlock: tpt_vault_platform_linux::unlock_pages,
+    });
+}
+
 fn main() {
+    install_page_locker();
     let app = tauri::Builder::default()
         .manage(AppState::new())
         .plugin(tauri_plugin_dialog::init())

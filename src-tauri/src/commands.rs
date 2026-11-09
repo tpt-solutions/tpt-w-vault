@@ -39,6 +39,12 @@ pub struct VaultStatus {
     pub unlocked: bool,
     pub root: Option<String>,
     pub auto_lock_minutes: u64,
+    /// The key bytes could not be pinned in RAM, so they may be written to the page file.
+    pub keys_locked: bool,
+    /// The vault has passed the soft write limit. Offer a key rebuild.
+    pub rekey_recommended: bool,
+    /// The vault has passed the hard write limit. Saves fail until the keys are rebuilt.
+    pub write_limit_reached: bool,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -62,10 +68,14 @@ fn root_of(root: &str) -> Result<PathBuf, AppError> {
 // --- session -----------------------------------------------------------------
 
 pub fn status_impl(state: &AppState) -> VaultStatus {
+    let budget = state.write_budget();
     VaultStatus {
         unlocked: state.is_unlocked(),
         root: state.root(),
         auto_lock_minutes: state.auto_lock().as_secs() / 60,
+        keys_locked: state.keys_locked(),
+        rekey_recommended: budget.is_some_and(|b| b.soft_reached),
+        write_limit_reached: budget.is_some_and(|b| b.hard_reached),
     }
 }
 

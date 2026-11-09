@@ -65,6 +65,7 @@ impl From<VaultError> for AppError {
             VaultError::ConsentDenied => "consent_denied",
             VaultError::PlatformNotEnrolled => "platform_not_enrolled",
             VaultError::Platform(_) => "platform",
+            VaultError::WriteLimitReached => "write_limit_reached",
             VaultError::Config(_) => "config",
             VaultError::Kdf(_) => "kdf",
             VaultError::Io(_) => "io",
@@ -141,6 +142,19 @@ impl AppState {
     /// Removes the session and returns it, for operations that consume it (re-key).
     pub fn take_session(&self) -> Option<Session> {
         lock_or_recover(&self.session).take()
+    }
+
+    /// Whether the open vault's key bytes are pinned in RAM. False when no vault is open.
+    pub fn keys_locked(&self) -> bool {
+        lock_or_recover(&self.session)
+            .as_ref()
+            .is_some_and(|s| s.vault.keys_locked())
+    }
+
+    /// Write-budget position of the open vault, if one is open. Reading it is not activity.
+    pub fn write_budget(&self) -> Option<tpt_vault_core::BudgetStatus> {
+        let guard = lock_or_recover(&self.session);
+        guard.as_ref().map(|session| session.vault.write_budget())
     }
 
     /// Runs `f` against the unlocked vault and counts the call as activity.
