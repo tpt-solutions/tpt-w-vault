@@ -7,13 +7,23 @@
 //! It creates a throwaway vault, mounts it as the given drive, exercises the usual file
 //! operations through the drive, unmounts, and reopens the vault to confirm the data is on disk.
 
+#[cfg(windows)]
 use std::{fs, sync::Arc, time::Duration};
 
+#[cfg(windows)]
 use tpt_vault_core::{FsVault, KdfParams, VaultBackend, VaultFile};
+#[cfg(windows)]
 use tpt_vault_platform_windows::WinFspMount;
 
+#[cfg(windows)]
 const PASS: &[u8] = b"mount-selftest";
 
+#[cfg(not(windows))]
+fn main() {
+    eprintln!("the WinFsp self-test runs on Windows only");
+}
+
+#[cfg(windows)]
 fn main() {
     let drive = std::env::args()
         .nth(1)
