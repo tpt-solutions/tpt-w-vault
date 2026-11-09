@@ -116,6 +116,11 @@ pub(crate) struct VaultConfig {
     /// Absent until platform unlock is enabled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platform: Option<SlotWrap>,
+    /// Block writes made under the current content key are never more than this. Raised in
+    /// chunks before writes pass it. Defaults to 0 for vaults written before the counter existed.
+    /// No release has shipped with such vaults.
+    #[serde(default)]
+    pub write_ceiling: u64,
 }
 
 fn derive_passphrase_key(passphrase: &[u8], kdf: &KdfConfig) -> Result<[u8; MASTER_KEY_LEN]> {
@@ -219,6 +224,7 @@ impl VaultConfig {
             wrapped_master_key: wrap_master(wrap_key, PASSPHRASE_AAD, &master),
             recovery: None,
             platform: None,
+            write_ceiling: 0,
         };
         Ok((config, master))
     }
@@ -304,6 +310,14 @@ impl VaultConfig {
         let config: VaultConfig = serde_json::from_str(&text)?;
         config.validate()?;
         Ok(config)
+    }
+
+    /// Reads `vault.conf`, sets the write ceiling, and writes it back. Callers hold the session's
+    /// config lock, so no other update can be lost between the read and the write.
+    pub(crate) fn store_write_ceiling(path: &Path, ceiling: u64) -> Result<()> {
+        let mut config = Self::load(path)?;
+        config.write_ceiling = ceiling;
+        config.save_atomic(path)
     }
 
     /// Writes the config via a temp file and rename, so a crash never leaves a half-written

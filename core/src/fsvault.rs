@@ -20,7 +20,7 @@ use std::{
     fs,
     io::ErrorKind,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex, MutexGuard},
 };
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -30,6 +30,7 @@ use zeroize::{Zeroize, Zeroizing};
 use crate::backend::{
     EntryInfo, EntryKind, STREAM_CHUNK, VaultBackend, VaultFile, map_io, split_path,
 };
+use crate::budget::{BudgetStatus, Limits, WriteBudget};
 use crate::config::Slot;
 use crate::config::{CONFIG_FILE_NAME, KdfParams, VaultConfig};
 use crate::error::{Result, VaultError};
@@ -50,6 +51,10 @@ pub struct FsVault {
     root: PathBuf,
     master: MasterKey,
     keys: Arc<DerivedKeys>,
+    budget: Arc<WriteBudget>,
+    /// Held while `vault.conf` is read and rewritten, so the write counter and the other config
+    /// updates in this session cannot overwrite each other.
+    conf_lock: Arc<Mutex<()>>,
 }
 
 impl FsVault {
@@ -72,8 +77,9 @@ impl FsVault {
         let (mut secret, code) = recovery::generate();
         config.set_slot(Slot::Recovery, &master, &secret);
         secret.zeroize();
+        let ceiling = config.write_ceiling;
         config.save_atomic(&conf)?;
-        Ok((Self::unlocked(root, master), code))
+        Ok((Self::unlocked(root, master, ceiling), code))
     }
 
     /// Unlocks an existing vault in `root` with its passphrase.
@@ -83,7 +89,7 @@ impl FsVault {
         let root = root.as_ref().to_path_buf();
         let config = VaultConfig::load(&root.join(CONFIG_FILE_NAME))?;
         let master = config.unlock(passphrase)?;
-        Ok(Self::unlocked(root, master))
+        Ok(Self::unlocked(root, master, config.write_ceiling))
     }
 
     /// Unlocks an existing vault in `root` with a recovery code.
@@ -97,7 +103,7 @@ impl FsVault {
         let config = VaultConfig::load(&root.join(CONFIG_FILE_NAME))?;
         let master = config.unlock_slot(Slot::Recovery, &secret);
         secret.zeroize();
-        Ok(Self::unlocked(root, master?))
+        Ok(Self::unlocked(root, master?, config.write_ceiling))
     }
 
     /// Changes the passphrase. The master key and all file contents are unchanged; only the
@@ -109,6 +115,7 @@ impl FsVault {
         params: KdfParams,
     ) -> Result<()> {
         let path = self.config_path();
+        let _conf = self.lock_config();
         let config = VaultConfig::load(&path)?;
         // Unlocking proves the caller knows the old passphrase. The rewrap uses this session's
         // master key, so the vault stays consistent with the open session.
@@ -121,6 +128,7 @@ impl FsVault {
     /// is required, so only someone who can unlock the vault can issue a new code.
     pub fn rotate_recovery_code(&self, passphrase: &[u8]) -> Result<RecoveryCode> {
         let path = self.config_path();
+        let _conf = self.lock_config();
         let mut config = VaultConfig::load(&path)?;
         let master = config.unlock(passphrase)?;
         let (mut secret, code) = recovery::generate();
@@ -164,8 +172,11 @@ impl FsVault {
         }
         fs::remove_dir_all(&old)?;
 
-        let FsVault { master, keys, .. } = fresh;
-        Ok((FsVault { root, master, keys }, code))
+        let FsVault { master, .. } = fresh;
+        // The swapped-in config carries the new vault's write counter, so the session counts
+        // from there.
+        let ceiling = VaultConfig::load(&root.join(CONFIG_FILE_NAME))?.write_ceiling;
+        Ok((Self::unlocked(root, master, ceiling), code))
     }
 
     /// Reads a vault's id from `vault.conf` without unlocking it. The platform layer needs the
@@ -180,6 +191,7 @@ impl FsVault {
     /// Calling this again issues a new key and invalidates the previous one.
     pub fn enable_platform_unlock(&self, passphrase: &[u8]) -> Result<PlatformKey> {
         let path = self.config_path();
+        let _conf = self.lock_config();
         let mut config = VaultConfig::load(&path)?;
         let master = config.unlock(passphrase)?;
         let mut secret = random_bytes::<32>();
@@ -195,6 +207,7 @@ impl FsVault {
     /// longer unlocks anything.
     pub fn disable_platform_unlock(&self, passphrase: &[u8]) -> Result<()> {
         let path = self.config_path();
+        let _conf = self.lock_config();
         let mut config = VaultConfig::load(&path)?;
         config.unlock(passphrase)?;
         if config.clear_slot(Slot::Platform) {
@@ -208,7 +221,19 @@ impl FsVault {
         let root = root.as_ref().to_path_buf();
         let config = VaultConfig::load(&root.join(CONFIG_FILE_NAME))?;
         let master = config.unlock_slot(Slot::Platform, key.as_bytes())?;
-        Ok(Self::unlocked(root, master))
+        Ok(Self::unlocked(root, master, config.write_ceiling))
+    }
+
+    /// Whether the key bytes are pinned in RAM. False where no page locker is installed, or where
+    /// the OS refused the lock.
+    pub fn keys_locked(&self) -> bool {
+        self.master.is_locked() && self.keys.is_locked()
+    }
+
+    /// Where this session stands against the write limits for its content key. The app should
+    /// recommend a re-key once `soft_reached` is true.
+    pub fn write_budget(&self) -> BudgetStatus {
+        self.budget.status()
     }
 
     /// Locks the vault. Dropping the session zeroizes the master key and derived keys.
@@ -219,9 +244,28 @@ impl FsVault {
         &self.root
     }
 
-    fn unlocked(root: PathBuf, master: MasterKey) -> Self {
+    fn unlocked(root: PathBuf, master: MasterKey, write_ceiling: u64) -> Self {
         let keys = Arc::new(master.derive());
-        FsVault { root, master, keys }
+        let conf_lock = Arc::new(Mutex::new(()));
+        let budget = Arc::new(WriteBudget::new(
+            root.join(CONFIG_FILE_NAME),
+            write_ceiling,
+            Limits::POLICY,
+            Arc::clone(&conf_lock),
+        ));
+        FsVault {
+            root,
+            master,
+            keys,
+            budget,
+            conf_lock,
+        }
+    }
+
+    fn lock_config(&self) -> MutexGuard<'_, ()> {
+        self.conf_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     fn config_path(&self) -> PathBuf {
@@ -254,13 +298,13 @@ impl FsVault {
         Ok(path)
     }
 
-    /// Like `disk_path`, but refuses the root (for operations that need a real entry).
     /// On-disk path of a vault entry. Used by tests that inspect or damage the raw bytes.
     #[cfg(test)]
     pub(crate) fn disk_file(&self, plain: &str) -> Result<PathBuf> {
         self.disk_entry_path(plain)
     }
 
+    /// Like `disk_path`, but refuses the root (for operations that need a real entry).
     fn disk_entry_path(&self, plain: &str) -> Result<PathBuf> {
         if split_path(plain)?.is_empty() {
             return Err(VaultError::InvalidPath {
@@ -464,7 +508,12 @@ impl VaultBackend for FsVault {
     fn create_file(&self, path: &str) -> Result<FileHandle> {
         let disk = self.disk_entry_path(path)?;
         self.write_sidecar(path)?;
-        FileHandle::create(&disk, path, Arc::clone(&self.keys))
+        FileHandle::create(
+            &disk,
+            path,
+            Arc::clone(&self.keys),
+            Arc::clone(&self.budget),
+        )
     }
 
     fn open_file(&self, path: &str) -> Result<FileHandle> {
@@ -472,7 +521,12 @@ impl VaultBackend for FsVault {
         if fs::metadata(&disk).map_err(|e| map_io(path, e))?.is_dir() {
             return Err(VaultError::NotAFile(path.to_owned()));
         }
-        FileHandle::open(&disk, path, Arc::clone(&self.keys))
+        FileHandle::open(
+            &disk,
+            path,
+            Arc::clone(&self.keys),
+            Arc::clone(&self.budget),
+        )
     }
 
     fn remove(&self, path: &str) -> Result<()> {

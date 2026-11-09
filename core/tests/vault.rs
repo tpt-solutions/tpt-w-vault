@@ -588,3 +588,26 @@ fn listing_a_file_or_opening_a_directory_gives_typed_errors() {
     ));
     assert!(matches!(vault.open_file("d"), Err(VaultError::NotAFile(_))));
 }
+
+#[test]
+fn each_block_write_is_counted_and_the_count_survives_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let v = new_vault(&dir);
+    assert_eq!(v.write_budget().writes, 0);
+
+    let mut f = v.create_file("count.bin").unwrap();
+    // 10 000 bytes from offset 0 span blocks 0, 1 and 2, so three nonces are used.
+    f.write_at(0, &pattern(10_000, 1)).unwrap();
+    assert_eq!(v.write_budget().writes, 3);
+    drop(f);
+    v.lock();
+
+    let reopened = FsVault::open(dir.path(), PASS).unwrap();
+    let status = reopened.write_budget();
+    assert!(
+        status.writes >= 3,
+        "count fell to {} after reopen",
+        status.writes
+    );
+    assert!(!status.soft_reached && !status.hard_reached);
+}

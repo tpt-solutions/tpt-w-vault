@@ -31,7 +31,12 @@ fn main() {
     let written = copy_into_file(&mut f, &mut io::repeat(0x5a).take(LARGE)).expect("write");
     let w = t.elapsed().as_secs_f64();
     drop(f);
-    println!("large write: {:.1} MiB/s ({} MiB in {:.2} s)", mib_per_s(written, w), written >> 20, w);
+    println!(
+        "large write: {:.1} MiB/s ({} MiB in {:.2} s)",
+        mib_per_s(written, w),
+        written >> 20,
+        w
+    );
 
     let mut f = vault.open_file("large.bin").expect("open");
     let t = Instant::now();

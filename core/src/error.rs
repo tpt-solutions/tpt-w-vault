@@ -40,6 +40,10 @@ pub enum VaultError {
     #[error("platform unlock failed: {0}")]
     Platform(String),
 
+    /// This vault has reached its write limit for its content key. Re-key it before saving more.
+    #[error("this vault has reached its write limit; rebuild its keys before saving more")]
+    WriteLimitReached,
+
     /// `vault.conf` or an on-disk file declares a format version this build cannot read.
     #[error("unsupported vault format version {0}")]
     UnsupportedVersion(u32),

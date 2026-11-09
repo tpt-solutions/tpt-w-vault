@@ -24,6 +24,7 @@
 
 pub mod backend;
 mod block;
+mod budget;
 pub mod config;
 pub mod error;
 mod file;
@@ -37,10 +38,12 @@ mod platform;
 mod recovery;
 
 pub use backend::{EntryInfo, EntryKind, VaultBackend, VaultFile, copy_from_file, copy_into_file};
+pub use budget::BudgetStatus;
 pub use config::{CONFIG_FILE_NAME, FORMAT_VERSION, KdfParams};
 pub use error::{Result, VaultError};
 pub use file::FileHandle;
 pub use fsvault::FsVault;
+pub use keys::{PageLocker, install_page_locker};
 pub use mount::{ROOT_INO, VaultTree};
 pub use platform::{
     ConsentGate, PLATFORM_KEY_LEN, PlatformKey, PlatformUnlock, Protector, SecretStore,

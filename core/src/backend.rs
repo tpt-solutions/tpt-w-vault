@@ -15,7 +15,7 @@ use crate::error::{Result, VaultError};
 
 /// Bytes moved per call by [`copy_into_file`] and [`copy_from_file`]. Aligned to whole blocks
 /// so sequential streaming encrypts each block once.
-pub const STREAM_CHUNK: usize = BLOCK_SIZE * 16;
+pub const STREAM_CHUNK: usize = BLOCK_SIZE * 256;
 
 /// Kind of a vault entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

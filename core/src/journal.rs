@@ -60,7 +60,7 @@ fn corrupt(disk: &Path, detail: &str) -> VaultError {
 /// Makes a directory entry change (create, rename, delete) durable on Unix.
 ///
 /// Windows journals directory metadata itself, so there is nothing to sync there.
-fn sync_parent(disk: &Path) -> Result<()> {
+pub(crate) fn sync_parent(disk: &Path) -> Result<()> {
     #[cfg(unix)]
     {
         if let Some(parent) = disk.parent() {
@@ -70,6 +70,11 @@ fn sync_parent(disk: &Path) -> Result<()> {
     #[cfg(not(unix))]
     let _ = disk;
     Ok(())
+}
+
+/// Temp file for a new encrypted file. Hidden from listings like the journal files.
+pub(crate) fn creation_temp(disk: &Path) -> PathBuf {
+    with_suffix(disk, TMP_SUFFIX)
 }
 
 fn remove_if_exists(path: &Path) -> Result<()> {
@@ -420,5 +425,88 @@ mod tests {
 
         v.create_file("g").unwrap().write_at(0, b"new").unwrap();
         assert_eq!(read_all(&v, "g"), b"new");
+    }
+
+    #[test]
+    fn small_write_rewrites_only_the_records_it_touches() {
+        // Regression: a write used to re-encrypt every record from the touched block to the end
+        // of the file, which made small writes in large files very slow.
+        let dir = tempfile::tempdir().unwrap();
+        let v = vault(&dir);
+        let mut f = v.create_file("f").unwrap();
+        f.write_at(0, &content(10 * BLOCK)).unwrap();
+        let disk = v.disk_file("f").unwrap();
+        let before = fs::read(&disk).unwrap();
+
+        f.write_at((5 * BLOCK + 10) as u64, b"small").unwrap();
+        drop(f);
+        let after = fs::read(&disk).unwrap();
+        assert_eq!(before.len(), after.len());
+
+        let rec = crate::block::RECORD_LEN;
+        let head = crate::file::HEADER_LEN;
+        let record = |bytes: &[u8], i: usize| bytes[head + i * rec..head + (i + 1) * rec].to_vec();
+        for i in (0..10).filter(|&i| i != 5) {
+            assert_eq!(
+                record(&before, i),
+                record(&after, i),
+                "record {i} was rewritten"
+            );
+        }
+        assert_ne!(record(&before, 5), record(&after, 5));
+    }
+}
+
+#[cfg(test)]
+mod creation_tests {
+    use super::{creation_temp, is_journal_name};
+    use crate::backend::VaultBackend;
+    use crate::config::KdfParams;
+    use crate::fsvault::FsVault;
+    use std::fs;
+
+    const KDF: KdfParams = KdfParams {
+        log_n: 10,
+        r: 8,
+        p: 1,
+    };
+
+    #[test]
+    fn interrupted_creation_leaves_no_visible_entry_and_is_cleaned_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let (v, _code) = FsVault::create(dir.path(), b"creation-test", KDF).unwrap();
+        let disk = v.disk_file("fresh.bin").unwrap();
+
+        // A create stopped before its final link leaves only its temp file behind.
+        let stale = creation_temp(&disk);
+        fs::write(&stale, b"half a header").unwrap();
+        assert!(is_journal_name(
+            stale.file_name().unwrap().to_str().unwrap()
+        ));
+        assert!(
+            v.list_dir("")
+                .unwrap()
+                .iter()
+                .all(|e| e.name != "fresh.bin")
+        );
+
+        v.create_file("fresh.bin").unwrap();
+        assert!(!stale.exists(), "temp file was not cleaned up");
+        assert!(
+            v.list_dir("")
+                .unwrap()
+                .iter()
+                .any(|e| e.name == "fresh.bin")
+        );
+    }
+
+    #[test]
+    fn creating_over_an_existing_name_is_refused_and_leaves_no_temp_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let (v, _code) = FsVault::create(dir.path(), b"creation-test", KDF).unwrap();
+        v.create_file("taken.bin").unwrap();
+        assert!(v.create_file("taken.bin").is_err());
+        let disk = v.disk_file("taken.bin").unwrap();
+        assert!(!creation_temp(&disk).exists());
     }
 }

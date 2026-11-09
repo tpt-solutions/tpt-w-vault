@@ -18,7 +18,7 @@
 //! update, and partial writes rewrite only the blocks they touch.
 
 use std::{
-    fs::{File, OpenOptions},
+    fs::{self, File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
     path::Path,
     sync::Arc,
@@ -28,6 +28,7 @@ use std::path::PathBuf;
 
 use crate::backend::{VaultFile, map_io};
 use crate::block::{self, BLOCK_SIZE, RECORD_LEN, RECORD_OVERHEAD};
+use crate::budget::WriteBudget;
 use crate::error::{Result, VaultError};
 use crate::journal;
 use crate::keys::{DerivedKeys, random_bytes};
@@ -63,6 +64,8 @@ pub(crate) fn plaintext_len_for_disk(total: u64) -> Option<u64> {
 pub struct FileHandle {
     file: File,
     keys: Arc<DerivedKeys>,
+    /// Counts block writes under the content key for the whole session.
+    budget: Arc<WriteBudget>,
     header: [u8; HEADER_LEN],
     /// Path of the encrypted file on disk. Its journal sits beside it.
     disk: PathBuf,
@@ -72,36 +75,60 @@ pub struct FileHandle {
 
 impl FileHandle {
     /// Creates a new, empty encrypted file. Fails if `disk` already exists.
-    pub(crate) fn create(disk: &Path, plain: &str, keys: Arc<DerivedKeys>) -> Result<Self> {
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .open(disk)
-            .map_err(|e| map_io(plain, e))?;
+    pub(crate) fn create(
+        disk: &Path,
+        plain: &str,
+        keys: Arc<DerivedKeys>,
+        budget: Arc<WriteBudget>,
+    ) -> Result<Self> {
         // A journal left by an earlier file at this path belongs to that file. Drop it, so it
-        // cannot be applied to this one.
+        // cannot be applied to this one. This also removes a temp file from an interrupted create.
         journal::discard(disk)?;
         let file_id: [u8; FILE_ID_LEN] = random_bytes();
         let mut header = [0u8; HEADER_LEN];
         header[..4].copy_from_slice(MAGIC);
         header[4] = FILE_FORMAT_VERSION;
         header[5..].copy_from_slice(&file_id);
-        let mut handle = FileHandle {
+        // The header goes into a temp file, which is then hard-linked to the final name. A crash
+        // leaves either no entry or a complete one. A hard link refuses to replace an existing
+        // entry, so this cannot clobber another file.
+        let tmp = journal::creation_temp(disk);
+        {
+            let mut out = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp)
+                .map_err(|e| map_io(plain, e))?;
+            out.write_all(&header)?;
+            out.sync_all()?;
+        }
+        let linked = fs::hard_link(&tmp, disk);
+        let _ = fs::remove_file(&tmp);
+        linked.map_err(|e| map_io(plain, e))?;
+        journal::sync_parent(disk)?;
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(disk)
+            .map_err(|e| map_io(plain, e))?;
+        Ok(FileHandle {
             file,
             keys,
             header,
+            budget,
             disk: disk.to_path_buf(),
             path: plain.to_owned(),
-        };
-        handle.file.write_all(&header)?;
-        handle.file.sync_data()?;
-        Ok(handle)
+        })
     }
 
     /// Opens an existing encrypted file and checks its header. An interrupted write left by an
     /// earlier session is undone first.
-    pub(crate) fn open(disk: &Path, plain: &str, keys: Arc<DerivedKeys>) -> Result<Self> {
+    pub(crate) fn open(
+        disk: &Path,
+        plain: &str,
+        keys: Arc<DerivedKeys>,
+        budget: Arc<WriteBudget>,
+    ) -> Result<Self> {
         journal::recover(disk)?;
         let mut file = OpenOptions::new()
             .read(true)
@@ -127,6 +154,7 @@ impl FileHandle {
             file,
             keys,
             header,
+            budget,
             disk: disk.to_path_buf(),
             path: plain.to_owned(),
         })
@@ -180,6 +208,8 @@ impl FileHandle {
 
     /// Encrypts `plain` as block `index` (with the given last-block flag) and writes its record.
     fn write_block(&mut self, index: u64, is_last: bool, plain: &[u8]) -> Result<()> {
+        // Each block write uses a new nonce, so it counts against the content key's budget.
+        self.budget.take()?;
         let aad = self.aad(index, is_last);
         let record = block::seal(&self.keys.content, &aad, plain);
         self.file
@@ -301,7 +331,10 @@ impl VaultFile for FileHandle {
         let end = offset + data.len() as u64;
         let new_len = old_len.max(end);
 
-        let last = (new_len - 1) / BLOCK_SIZE_U64;
+        // Only the blocks that the write touches are rewritten: from `start` through the block
+        // holding the last byte written. Blocks past that are left alone, so a small write in
+        // a large file costs the same as in a small one.
+        let end_block = (end - 1) / BLOCK_SIZE_U64;
         // Start at the old last block (its last-block flag may change) or at the first
         // touched block, whichever is earlier. An empty file starts at 0.
         let start = if old_len == 0 {
@@ -310,11 +343,11 @@ impl VaultFile for FileHandle {
             let old_last = (old_len - 1) / BLOCK_SIZE_U64;
             old_last.min(offset / BLOCK_SIZE_U64)
         };
-        // Records from `start` to `last` are rewritten. The journal saves the ones that exist.
+        // Records from `start` to `end_block` are rewritten. The journal saves the ones that exist.
         let saved_from = HEADER_LEN_U64 + start * RECORD_LEN_U64;
-        let saved_to = HEADER_LEN_U64 + (last + 1) * RECORD_LEN_U64;
+        let saved_to = HEADER_LEN_U64 + (end_block + 1) * RECORD_LEN_U64;
         self.guarded(saved_from, saved_to, |this| {
-            this.write_blocks(offset, data, old_len, total, start, last, new_len)
+            this.write_blocks(offset, data, old_len, total, start, end_block, new_len)
         })
     }
 }
@@ -333,9 +366,12 @@ impl FileHandle {
         new_len: u64,
     ) -> Result<()> {
         let end = offset + data.len() as u64;
+        // The file's final block is the only one that may be short, and the only one sealed as
+        // last. `last` is just the end of this write's range.
+        let final_block = (new_len - 1) / BLOCK_SIZE_U64;
         for index in start..=last {
             let block_start = index * BLOCK_SIZE_U64;
-            let block_len = if index == last {
+            let block_len = if index == final_block {
                 new_len - block_start
             } else {
                 BLOCK_SIZE_U64
@@ -357,7 +393,7 @@ impl FileHandle {
                 plain[dst].copy_from_slice(&data[src]);
             }
 
-            self.write_block(index, index == last, &plain)?;
+            self.write_block(index, index == final_block, &plain)?;
         }
         Ok(())
     }
