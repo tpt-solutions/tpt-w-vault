@@ -69,7 +69,9 @@ mod tests {
     /// unsupported rather than fail.
     #[test]
     fn missing_bus_means_unsupported_not_error() {
-        if std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_none() {
+        // zbus falls back to $XDG_RUNTIME_DIR/bus when DBUS_SESSION_BUS_ADDRESS is unset, so
+        // the environment variable does not tell us whether a bus exists. Ask the bus itself.
+        if zbus::blocking::Connection::session().is_err() {
             assert!(!platform_unlock_supported());
             assert!(linux_unlock().is_err());
         }
