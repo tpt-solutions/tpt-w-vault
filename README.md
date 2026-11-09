@@ -1,5 +1,8 @@
 # tpt-vault
 
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
+[![CI](https://github.com/tpt-solutions/tpt-w-vault/actions/workflows/ci.yml/badge.svg)](https://github.com/tpt-solutions/tpt-w-vault/actions/workflows/ci.yml)
+
 **Local-first encrypted vault and secure markdown notes editor.** A VeraCrypt alternative for
 people who just want to hide a folder of sensitive files, without the intimidation.
 
@@ -9,7 +12,8 @@ people who just want to hide a folder of sensitive files, without the intimidati
 - Built-in encrypted markdown editor
 - Archon backend over the tpt-archon page cache (feature `archon`, Phase 10)
 
-Targets Windows and Linux for v1. Part of the TPT Solutions project family; see the
+Targets Windows and Linux for v1. Install steps are in [docs/install.md](docs/install.md); the
+user guide is in [docs/user-guide.md](docs/user-guide.md). Part of the TPT Solutions project family; see the
 [tpt-archon](https://github.com/tpt-solutions/tpt-archon) platform.
 
 **Status:** pre-alpha. The roadmap is in [todo.md](todo.md); the original design is in
@@ -24,7 +28,7 @@ Targets Windows and Linux for v1. Part of the TPT Solutions project family; see 
 | `platform-linux/` | Secret Service (D-Bus), fprintd, FUSE |
 | `platform-archon/` | Archon page-cache backend (feature-gated) |
 | `src/` | Frontend (TypeScript + HTML, Vite, no framework) |
-| `src-tauri/` | Tauri shell (Phase 8, not yet added) |
+| `src-tauri/` | Tauri shell and IPC commands |
 
 ## Building
 

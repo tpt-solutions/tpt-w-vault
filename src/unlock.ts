@@ -44,6 +44,21 @@ function remember(root: string): void {
   }
 }
 
+/**
+ * Removes a folder from this viewer's recent list and from the "remembered" folder. The vault's
+ * files are not touched. Returns the list that remains.
+ */
+export function forgetRecentRoot(root: string): string[] {
+  const remaining = recentRoots().filter((r) => r !== root);
+  try {
+    localStorage.setItem(RECENT_ROOTS_KEY, JSON.stringify(remaining));
+    if (rememberedRoot() === root) localStorage.removeItem(LAST_ROOT_KEY);
+  } catch {
+    // Storage can be blocked. The entry then reappears next time, which is harmless.
+  }
+  return remaining;
+}
+
 export interface UnlockOptions {
   notice?: string;
   platformSupported: boolean;
@@ -86,16 +101,41 @@ export function renderUnlock(container: HTMLElement, opts: UnlockOptions): void 
     "select",
     {
       "aria-label": "Recent vaults",
-      hidden: recent.length === 0,
       on: {
         change: () => {
           if (recentSelect.value) rootInput.value = recentSelect.value;
+          forgetButton.disabled = !recentSelect.value;
         },
       },
     },
     el("option", { value: "" }, "Recent vaults…"),
     ...recent.map((r) => el("option", { value: r }, r)),
   ) as HTMLSelectElement;
+  const forgetButton: HTMLButtonElement = el(
+    "button",
+    {
+      type: "button",
+      disabled: true,
+      on: {
+        click: () => {
+          const root = recentSelect.value;
+          if (!root) return;
+          const remaining = forgetRecentRoot(root);
+          recentSelect.querySelector(`option[value="${CSS.escape(root)}"]`)?.remove();
+          if (rootInput.value.trim() === root) rootInput.value = "";
+          recentSelect.value = "";
+          forgetButton.disabled = true;
+          recentRow.hidden = remaining.length === 0;
+          setStatus(
+            status,
+            "Removed from the recent list. The vault folder and its files were not changed.",
+          );
+        },
+      },
+    },
+    "Forget",
+  ) as HTMLButtonElement;
+  const recentRow = el("div", { class: "row", hidden: recent.length === 0 }, recentSelect, forgetButton);
   const passInput = el("input", { id: "pass", type: "password", autocomplete: "current-password" });
   const confirmInput = el("input", { id: "confirm", type: "password", autocomplete: "new-password" });
   const codeInput = el("input", { id: "code", type: "text", autocomplete: "off", spellcheck: false });
@@ -203,7 +243,7 @@ export function renderUnlock(container: HTMLElement, opts: UnlockOptions): void 
   mount(
     form,
     el("label", {}, "Vault folder", el("div", { class: "row" }, rootInput, browseButton)),
-    recentSelect,
+    recentRow,
     el("label", {}, "Passphrase", passInput),
     el("label", {}, "Confirm passphrase", confirmInput),
     el("label", {}, "Recovery code (with hyphens or without)", codeInput),

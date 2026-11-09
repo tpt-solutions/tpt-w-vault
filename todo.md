@@ -75,7 +75,7 @@ Decisions made 2026-11-10:
 | 10 | Archon Support (Real Page-Cache Integration)       | ⏸ Deferred past v1 |
 | 11 | Performance & Polish                               | 🟡 In Progress (crypto throughput profiled and fixed; see `docs/performance.md`) |
 | 12 | Testing & QA                                       | ❌ Not Started |
-| 13 | Release v1                                         | ❌ Not Started |
+| 13 | Release v1                                         | 🟡 In Progress (docs and release steps done; installers and publishing open) |
 
 ---
 
@@ -89,7 +89,7 @@ Decisions made 2026-11-10:
 - [x] `rust-toolchain.toml` (MSRV pin), `rustfmt.toml`, `clippy.toml`
 - [x] Configure `tauri.conf.json` (app id, window defaults, bundle identifiers) — Phase 8
 - [x] TypeScript config (tsconfig, Vite, no framework)
-- [x] `README.md` (from spec.txt), build instructions (license badges still to add)
+- [x] `README.md` (from spec.txt), build instructions, license and CI badges
 - [x] Set up CI (GitHub Actions, build+lint+test on Windows + Linux runners) — workflow file
       added at `.github/workflows/ci.yml`; not yet run on GitHub
 - [x] Repo hosting under `tpt-solutions` GitHub org (https://github.com/tpt-solutions/tpt-w-vault)
@@ -180,8 +180,10 @@ Decisions made 2026-11-10:
       unmounts when the session ends (lock, idle, tray, exit). Settings can mount and unmount by
       hand. A mount that fails leaves the vault open without a drive.
 - [~] Handle Windows-specific filesystem semantics. The shared inode layer
-      (`core/src/mount.rs`) covers rename and replace rules. Not yet handled: reserved device
-      names (CON, NUL, ...), trailing dots and spaces, and attributes
+      (`core/src/mount.rs`) covers rename and replace rules. Reserved device names (CON, NUL,
+      COM1..9, LPT1..9, with or without an extension), trailing dots and spaces, and the
+      characters `<>"|?*` are refused by the shared path check (`core/src/backend.rs`) on every
+      platform. Not yet handled: attributes
 - [ ] Clean unmount on crash/forced app termination (no orphaned drive letters). Not tested.
       A killed process should drop the drive when WinFsp notices the device is gone, but that is
       unverified.
@@ -245,7 +247,8 @@ Decisions made 2026-11-10:
       a live side-by-side preview, debounced autosave, and a visible save status
 - [~] Settings (`src/settings.ts`): auto-lock timeout, passphrase change, recovery code rotation,
       Windows Hello on or off, and key rebuild. Recent vaults are listed on the unlock screen (one vault open
-      at a time). Not done: forgetting or renaming recent vaults
+      at a time). Forgetting a recent vault is done (`forgetRecentRoot`, tested in
+      `tests/frontend/recent.test.ts`). Renaming is not planned: the folder path identifies a vault
 - [x] First-run vault creation wizard (explains what a vault is, in plain non-technical language,
       per spec.txt's "less intimidating than VeraCrypt" goal). Shown on first run, from
       `src/wizard.ts`. Folder picker is the native dialog (`tauri-plugin-dialog`)
@@ -293,15 +296,15 @@ Decisions made 2026-11-10:
 
 ## Phase 13 — Release v1
 - [x] Finalize versioning scheme (SemVer) and changelog process (policy in the `CHANGELOG.md`
-      header; release steps still to write)
+      header; release steps in `docs/release.md`)
 - [ ] Windows installer (MSI/NSIS via Tauri bundler), WinFsp dependency bundling/detection
 - [ ] Linux packaging (.deb/.rpm/AppImage via Tauri bundler), documented FUSE/Secret
       Service/fprintd dependency requirements
 - [ ] Publish LICENSE files + notices in release artifacts
-- [ ] User-facing docs (install guide, vault creation/unlock guide, recovery key guide, privacy
-      explainer)
+- [x] User-facing docs: install guide (`docs/install.md`), vault creation and unlock guide and
+      privacy explainer (`docs/user-guide.md`), recovery key guide (`docs/recovery-key.md`)
 - [ ] Tag v1.0.0 release, publish to GitHub (tpt-solutions org)
-- [ ] Post-release triage process for bug reports
+- [x] Post-release triage process for bug reports (`docs/triage.md`)
 
 ---
 

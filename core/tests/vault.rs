@@ -577,6 +577,19 @@ fn path_traversal_and_reserved_names_are_rejected() {
 }
 
 #[test]
+fn names_windows_cannot_store_are_refused_before_anything_is_written() {
+    let dir = tempfile::tempdir().unwrap();
+    let vault = new_vault(&dir);
+    for bad in ["NUL.md", "docs/con", "notes.", "a<b.md"] {
+        assert!(
+            matches!(vault.create_file(bad), Err(VaultError::InvalidPath { .. })),
+            "should reject {bad:?}"
+        );
+    }
+    assert!(vault.list_dir("").unwrap().is_empty());
+}
+
+#[test]
 fn listing_a_file_or_opening_a_directory_gives_typed_errors() {
     let dir = tempfile::tempdir().unwrap();
     let vault = new_vault(&dir);

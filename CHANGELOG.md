@@ -20,6 +20,10 @@ change the vault format; see the notes for each release.
 - App: settings for auto-lock, passphrase change, recovery code renewal, Windows Hello on or
   off, and key rebuild.
 - Tray icon with lock action, and locking on idle, window close and quit.
+- App: **Forget** on the recent vaults list removes a folder from the list. The vault's files are
+  not touched.
+- Docs: install guide (`docs/install.md`), recovery code guide (`docs/recovery-key.md`), release
+  steps (`docs/release.md`) and post-release triage (`docs/triage.md`).
 
 ### Changed
 - Linux: the vault can be mounted as a folder through FUSE (`platform-linux/src/fuse.rs`, `fuser` 0.15, MIT). The app mounts on unlock at `~/tpt-vault` and unmounts when the session ends.
@@ -44,10 +48,14 @@ change the vault format; see the notes for each release.
 ### Fixed
 - Writes no longer re-encrypt the rest of the file. A small write in a large file now costs the
   same as in a small one (`docs/performance.md`).
+- Names are checked against Windows rules on every platform, so a vault made on Linux still mounts
+  on Windows. Refused: the device names (CON, NUL, COM1 to COM9, LPT1 to LPT9, with or without an
+  extension), names ending in a dot or space, and the characters `<>"|?*`.
 - Streaming writes use 1 MiB chunks instead of 64 KiB, which cuts the number of flushes.
 
 ### Known limitations
-- Mounting as a drive (WinFsp on Windows, FUSE on Linux) is not available yet.
-- Linux platform code is written but has not been run on a Linux session.
-- File creation is not journaled, so a crash during creation can leave an empty file.
-- Vault folders are chosen by hand or with the picker. There is no list of recent vaults.
+- Linux platform code is checked by CI (FUSE self-test), but has not been run on a Linux desktop
+  session.
+- Windows drive mounts need WinFsp installed separately. The installer does not bundle it yet.
+- Symbolic links are not supported in the mounted view.
+- A killed app process has not been tested for stale mounts on either platform.

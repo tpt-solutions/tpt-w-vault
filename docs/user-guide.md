@@ -30,6 +30,11 @@ end.
   with or without the hyphens.
 - If Windows Hello is turned on for the vault, **Unlock with Windows Hello** appears. Your
   fingerprint or face confirms it.
+- The **Recent vaults** list shows folders you opened on this computer. **Forget** removes the
+  selected folder from that list. It does not touch the vault's files.
+
+The recovery code guide is in [recovery-key.md](recovery-key.md). Installing is covered in
+[install.md](install.md).
 
 ## Working with notes and folders
 
@@ -66,10 +71,16 @@ the app, so the app never navigates away from your vault.
   it if you think the keys were exposed. It copies every file, so it needs free disk space about
   twice the vault's size, and it can take a while.
 
+## Using the vault as a drive
+
+- **Windows**: the vault appears as a drive letter when you unlock it. It needs WinFsp, see
+  [install.md](install.md). Without WinFsp the vault still opens in the app, but there is no drive.
+- **Linux**: the vault appears in `~/tpt-vault` when you unlock it, and goes away when you lock it.
+
+Lock the vault before you copy the vault folder somewhere else.
+
 ## Not available yet
 
-- Using the vault as a drive letter (Windows) or mount point (Linux). The mount backends are
-  still being built.
 - Drag-and-drop import from File Explorer.
-- Choosing from a list of recent vaults.
-- Linux. The Linux code has not been run on a Linux desktop yet.
+- Renaming an entry in the recent vaults list. Use **Forget** to remove an entry instead.
+- Linux desktop sessions have not been tested by hand yet (GNOME, KDE, X11 and Wayland).

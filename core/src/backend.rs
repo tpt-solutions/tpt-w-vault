@@ -128,9 +128,43 @@ pub fn split_path(path: &str) -> Result<Vec<&str>> {
         if seg.contains(['\\', ':', '\0']) {
             return Err(invalid("contains a reserved character (\\, : or NUL)"));
         }
+        // Names are checked against Windows rules on every platform, so a vault made on Linux
+        // still mounts on Windows.
+        if seg.contains(['<', '>', '"', '|', '?', '*']) || seg.chars().any(|c| c < ' ') {
+            return Err(invalid(
+                "contains a character Windows does not allow (<>\"|?* or control)",
+            ));
+        }
+        if seg.ends_with(['.', ' ']) {
+            return Err(invalid(
+                "ends with a dot or space, which Windows does not allow",
+            ));
+        }
+        if is_windows_device_name(seg) {
+            return Err(invalid(
+                "is a reserved device name on Windows (CON, NUL, COM1, ...)",
+            ));
+        }
         segments.push(seg);
     }
     Ok(segments)
+}
+
+/// True if `seg` names a DOS device on Windows, with or without an extension: `CON`, `nul.txt`,
+/// `COM5.md`, and so on. Windows compares these case-insensitively and ignores the extension.
+pub fn is_windows_device_name(seg: &str) -> bool {
+    let stem = seg
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_uppercase();
+    match stem.as_str() {
+        "CON" | "PRN" | "AUX" | "NUL" => true,
+        s if s.len() == 4 && (s.starts_with("COM") || s.starts_with("LPT")) => {
+            s.as_bytes()[3].is_ascii_digit()
+        }
+        _ => false,
+    }
 }
 
 /// Copies everything from `reader` into `file`, starting at offset 0. Streams in
@@ -200,6 +234,46 @@ mod tests {
     #[test]
     fn splits_normal_paths() {
         assert_eq!(split_path("a/b/c.md").unwrap(), vec!["a", "b", "c.md"]);
+    }
+
+    #[test]
+    fn rejects_names_windows_cannot_store() {
+        for bad in [
+            "CON",
+            "nul.txt",
+            "a/Com5.md",
+            "lpt1",
+            "AUX.tar.gz",
+            "prn",
+            "trailing.",
+            "trailing ",
+            "a/b /c",
+            "x<y",
+            "q?",
+            "p*",
+            "p|",
+            "\"quoted\"",
+            "tab\tname",
+        ] {
+            assert!(
+                matches!(split_path(bad), Err(VaultError::InvalidPath { .. })),
+                "should reject {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn allows_names_that_only_look_like_device_names() {
+        for ok in [
+            "console.md",
+            "COM10",
+            "lpt",
+            "null-notes.md",
+            "my con.md",
+            "a.b.c",
+        ] {
+            assert!(split_path(ok).is_ok(), "should accept {ok:?}");
+        }
     }
 
     #[test]
