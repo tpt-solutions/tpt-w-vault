@@ -97,6 +97,7 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
 fn main() {
     let app = tauri::Builder::default()
         .manage(AppState::new())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             setup_tray(app)?;
             spawn_idle_watcher(app.handle().clone());
