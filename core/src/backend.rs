@@ -75,6 +75,39 @@ pub trait VaultBackend {
     fn stat(&self, path: &str) -> Result<EntryInfo>;
 }
 
+/// A shared backend is a backend. This lets a mount and the app hold the same open vault.
+impl<B: VaultBackend> VaultBackend for std::sync::Arc<B> {
+    type File = B::File;
+
+    fn create_dir(&self, path: &str) -> Result<()> {
+        (**self).create_dir(path)
+    }
+
+    fn list_dir(&self, path: &str) -> Result<Vec<EntryInfo>> {
+        (**self).list_dir(path)
+    }
+
+    fn create_file(&self, path: &str) -> Result<Self::File> {
+        (**self).create_file(path)
+    }
+
+    fn open_file(&self, path: &str) -> Result<Self::File> {
+        (**self).open_file(path)
+    }
+
+    fn remove(&self, path: &str) -> Result<()> {
+        (**self).remove(path)
+    }
+
+    fn rename(&self, from: &str, to: &str) -> Result<()> {
+        (**self).rename(from, to)
+    }
+
+    fn stat(&self, path: &str) -> Result<EntryInfo> {
+        (**self).stat(path)
+    }
+}
+
 /// Splits and validates a plaintext path into its segments. The root yields no segments.
 pub fn split_path(path: &str) -> Result<Vec<&str>> {
     if path.is_empty() {

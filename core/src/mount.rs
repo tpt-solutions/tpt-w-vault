@@ -47,6 +47,11 @@ impl<B: VaultBackend> VaultTree<B> {
         tree
     }
 
+    /// Gives back the backend, ending the inode table. Used when a mount is torn down.
+    pub fn into_backend(self) -> B {
+        self.backend
+    }
+
     /// The underlying backend, for operations that have no inode form.
     pub fn backend(&self) -> &B {
         &self.backend
@@ -102,6 +107,21 @@ impl<B: VaultBackend> VaultTree<B> {
             .get(parent_path)
             .copied()
             .ok_or_else(|| VaultError::NotFound(format!("parent of inode {ino}")))
+    }
+
+    /// Vault path of inode `ino`. The root is the empty string.
+    pub fn path(&self, ino: u64) -> Result<String> {
+        self.path_of(ino)
+    }
+
+    /// Inode of the entry at vault `path`, where `""` is the root and `/` separates segments.
+    /// Every segment must exist.
+    pub fn resolve(&mut self, path: &str) -> Result<u64> {
+        let mut ino = ROOT_INO;
+        for segment in path.split('/').filter(|s| !s.is_empty()) {
+            ino = self.lookup(ino, segment)?.0;
+        }
+        Ok(ino)
     }
 
     /// Metadata for an inode.
@@ -336,5 +356,20 @@ mod tests {
         t.write(ino, 0, b"abc").unwrap();
         assert_eq!(t.read(ino, 1, 100).unwrap(), b"bc");
         assert!(t.read(ino, 50, 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn resolve_follows_path_segments_to_the_same_inode_as_lookup() {
+        let (_dir, mut t) = tree();
+        let dir = t.mkdir(ROOT_INO, "docs").unwrap();
+        let file = t.create(dir, "a.md").unwrap();
+        assert_eq!(t.resolve("").unwrap(), ROOT_INO);
+        assert_eq!(t.resolve("docs").unwrap(), dir);
+        assert_eq!(t.resolve("docs/a.md").unwrap(), file);
+        assert_eq!(t.path(file).unwrap(), "docs/a.md");
+        assert!(matches!(
+            t.resolve("docs/missing"),
+            Err(VaultError::NotFound(_))
+        ));
     }
 }
