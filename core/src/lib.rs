@@ -31,6 +31,7 @@ mod fsvault;
 mod keys;
 pub mod mount;
 mod names;
+pub mod notes;
 mod platform;
 mod recovery;
 
