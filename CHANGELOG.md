@@ -22,6 +22,8 @@ change the vault format; see the notes for each release.
 - Tray icon with lock action, and locking on idle, window close and quit.
 
 ### Changed
+- Linux: the vault can be mounted as a folder through FUSE (`platform-linux/src/fuse.rs`, `fuser` 0.15, MIT). The app mounts on unlock at `~/tpt-vault` and unmounts when the session ends.
+- CI: the Linux job installs the GTK, WebKit and FUSE packages it needs, and runs the FUSE self-test.
 - Windows: the vault can be mounted as a drive through WinFsp (`platform-windows/src/winfsp`). The app mounts on unlock and unmounts when the session ends. The WinFsp binding is written against WinFsp's API; the GPL `winfsp` crate is not used.
 - Core: `VaultBackend` is implemented for `Arc<B>`, so the app and a mount can share one open vault.
 - Core: the write count per content key is enforced. Soft limit 2^31 block writes (re-key

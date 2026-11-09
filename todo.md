@@ -68,7 +68,7 @@ Decisions made 2026-11-10:
 | 3  | Windows Platform Integration                       | 🟡 In Progress (Hello prompt unverified by hand) |
 | 4  | Linux Platform Integration                         | 🟡 In Progress (untested on Linux) |
 | 5  | Windows Mount Backend                              | 🟡 Mount works and passes a file-operation self-test; crash-unmount and reserved names open |
-| 6  | Linux Mount Backend                                | 🟡 In Progress (adapter not wired in; to be checked on CI) |
+| 6  | Linux Mount Backend                                | 🟡 Mount passes the file-operation self-test on a Linux kernel; crash cleanup open |
 | 7  | Secure Markdown Editor                             | ✅ Done (live preview, toolbar, notes-only filter) |
 | 8  | Tauri Shell & IPC Layer                             | 🟡 Built and tested (tray and lock flow not yet checked by hand) |
 | 9  | Frontend (Vault Browser / Editor / Settings)       | 🟡 In Progress (drag-and-drop deferred; vault management open) |
@@ -191,17 +191,20 @@ Decisions made 2026-11-10:
       letter. Crash-unmount recovery is not tested.
 
 ## Phase 6 — Linux Mount Backend
-- [~] FUSE integration via `fuser`. The inode layer is done and tested (`core/src/mount.rs`).
-      The adapter is written (`platform-linux/src/fuse.rs`) but not compiled, since no Linux
-      build environment is available. It is not wired into the crate yet, to keep the Linux
-      CI job green
-- [ ] Mount point lifecycle (mount on unlock, unmount on lock/app exit). Needs a Linux machine
+- [x] FUSE integration via `fuser` 0.15 (MIT). The adapter (`platform-linux/src/fuse.rs`)
+      runs over the inode layer in `core/src/mount.rs`. It compiles and passes the file-operation
+      self-test on a Linux kernel (the container run and the CI Linux job)
+- [x] Mount point lifecycle: the app mounts on unlock at `~/tpt-vault` and unmounts when the
+      session ends (lock, idle, tray, exit). The mount runs on a background thread (`FuseMount`),
+      and `Drop` unmounts it. The app's lock and exit paths were not run by hand on Linux
 - [~] Handle POSIX semantics. Rename, replace, and inode stability are covered. Permissions
       are fixed by the vault (0700 directories, 0600 files). Symlinks are not supported
-- [ ] Clean unmount on crash/forced app termination (no stale mount points). `AutoUnmount` is
-      set in the adapter. Unverified until run on Linux
-- [ ] Integration tests: file CRUD through the FUSE mount, large-file streaming, crash-unmount
-      recovery. Needs a Linux machine
+- [~] Clean unmount on crash/forced app termination (no stale mount points). `AutoUnmount` is
+      set in the adapter. A normal unmount leaves the mount point clean. A killed process has not
+      been tested yet
+- [~] Integration tests: file CRUD through the FUSE mount and a 300 KB file, with the data
+      checked after unmount, pass in `platform-linux/examples/mount_selftest.rs`, which runs in
+      the CI Linux job. Crash-unmount recovery is not tested
 
 ## Phase 7 — Secure Markdown Editor
 - [x] In-app markdown editor component (edit + live preview) operating directly on vault entries
