@@ -8,7 +8,8 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:unit": "esbuild tests/frontend/markdown.test.ts tests/frontend/logic.test.ts tests/frontend/editor.test.ts --bundle --platform=node --format=esm --outdir=.test-build --log-level=warning && node --test .test-build/markdown.test.js .test-build/logic.test.js .test-build/editor.test.js"
   },
   "devDependencies": {
     "typescript": "5.9.2",
