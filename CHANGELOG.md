@@ -22,6 +22,8 @@ change the vault format; see the notes for each release.
 - Tray icon with lock action, and locking on idle, window close and quit.
 
 ### Changed
+- Windows: the vault can be mounted as a drive through WinFsp (`platform-windows/src/winfsp`). The app mounts on unlock and unmounts when the session ends. The WinFsp binding is written against WinFsp's API; the GPL `winfsp` crate is not used.
+- Core: `VaultBackend` is implemented for `Arc<B>`, so the app and a mount can share one open vault.
 - Core: the write count per content key is enforced. Soft limit 2^31 block writes (re-key
   recommended), hard limit 2^32 (writes refused until re-keyed). The count is stored in
   `vault.conf` (`core/src/budget.rs`). Vaults made before this change start at zero.

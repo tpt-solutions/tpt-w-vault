@@ -67,7 +67,7 @@ Decisions made 2026-11-10:
 | 2  | Key Management & Unlock Flows                      | 🟡 In Progress (key pages pinned; plaintext buffers open) |
 | 3  | Windows Platform Integration                       | 🟡 In Progress (Hello prompt unverified by hand) |
 | 4  | Linux Platform Integration                         | 🟡 In Progress (untested on Linux) |
-| 5  | Windows Mount Backend                              | 🟡 WinFsp install approved; provider not written yet |
+| 5  | Windows Mount Backend                              | 🟡 Mount works and passes a file-operation self-test; crash-unmount and reserved names open |
 | 6  | Linux Mount Backend                                | 🟡 In Progress (adapter not wired in; to be checked on CI) |
 | 7  | Secure Markdown Editor                             | ✅ Done (live preview, toolbar, notes-only filter) |
 | 8  | Tauri Shell & IPC Layer                             | 🟡 Built and tested (tray and lock flow not yet checked by hand) |
@@ -173,16 +173,22 @@ Decisions made 2026-11-10:
       round trip needs a live bus or a mock of the D-Bus layer, which is not built yet
 
 ## Phase 5 — Windows Mount Backend
-- [ ] WinFsp integration (Rust bindings) implementing a filesystem provider backed by
-      `VaultBackend`. WinFsp install approved (2026-11-10). Provider not written yet.
-- [ ] Virtual drive letter assignment/lifecycle (mount on unlock, unmount on lock/app exit).
-      Blocked on the same install
+- [x] WinFsp integration: own FFI over `winfsp-x64.dll` (`platform-windows/src/winfsp/`),
+      loaded at run time with `libloading`. Layouts follow WinFsp's public API header. The
+      GPL `winfsp` crate is not used, so no GPL code is in the tree.
+- [x] Virtual drive letter lifecycle: the app mounts on unlock at the highest free letter, and
+      unmounts when the session ends (lock, idle, tray, exit). Settings can mount and unmount by
+      hand. A mount that fails leaves the vault open without a drive.
 - [~] Handle Windows-specific filesystem semantics. The shared inode layer
       (`core/src/mount.rs`) covers rename and replace rules. Not yet handled: reserved device
       names (CON, NUL, ...), trailing dots and spaces, and attributes
-- [ ] Clean unmount on crash/forced app termination (no orphaned drive letters). Blocked, as above
-- [ ] Integration tests: file CRUD through the mounted drive, large-file streaming, crash-unmount
-      recovery. Blocked, as above
+- [ ] Clean unmount on crash/forced app termination (no orphaned drive letters). Not tested.
+      A killed process should drop the drive when WinFsp notices the device is gone, but that is
+      unverified.
+- [~] Integration tests: file CRUD (create, read, write, rename, list, delete) and a 300 KB file
+      through the drive, with the data checked after unmount, pass in
+      `platform-windows/examples/mount_selftest.rs`. Not automated: it needs WinFsp and a drive
+      letter. Crash-unmount recovery is not tested.
 
 ## Phase 6 — Linux Mount Backend
 - [~] FUSE integration via `fuser`. The inode layer is done and tested (`core/src/mount.rs`).
