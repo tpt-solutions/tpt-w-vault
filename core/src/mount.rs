@@ -323,7 +323,10 @@ mod tests {
         t.truncate(ino, 20).unwrap();
         let got = t.read(ino, 0, 100).unwrap();
         assert_eq!(&got[..10], &[1u8; 10]);
-        assert!(got[10..].iter().all(|&b| b == 0), "extension is zero-filled");
+        assert!(
+            got[10..].iter().all(|&b| b == 0),
+            "extension is zero-filled"
+        );
     }
 
     #[test]
