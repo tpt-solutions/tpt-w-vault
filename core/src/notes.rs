@@ -9,7 +9,7 @@
 
 use std::time::{Duration, Instant};
 
-use crate::backend::{VaultBackend, VaultFile};
+use crate::backend::{EntryKind, VaultBackend, VaultFile};
 use crate::error::Result;
 
 /// Default quiet period after the last keystroke before a save.
@@ -109,9 +109,49 @@ pub fn load_note<B: VaultBackend>(backend: &B, path: &str) -> Result<String> {
     })
 }
 
+/// Whether `name` is a markdown note by extension (`.md`, case-insensitive).
+pub fn is_note_name(name: &str) -> bool {
+    name.len() > 3
+        && name.is_char_boundary(name.len() - 3)
+        && name[name.len() - 3..].eq_ignore_ascii_case(".md")
+}
+
+/// Lists every markdown note under `dir` (the vault root for `""`), recursively.
+///
+/// Returns full vault paths, sorted, with `/` separators. Non-note files are skipped.
+pub fn list_notes<B: VaultBackend>(backend: &B, dir: &str) -> Result<Vec<String>> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.trim_matches('/').to_owned()];
+    while let Some(current) = stack.pop() {
+        for entry in backend.list_dir(&current)? {
+            let path = if current.is_empty() {
+                entry.name.clone()
+            } else {
+                format!("{current}/{}", entry.name)
+            };
+            match entry.kind {
+                EntryKind::Directory => stack.push(path),
+                EntryKind::File if is_note_name(&entry.name) => out.push(path),
+                EntryKind::File => {}
+            }
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn note_names_are_matched_by_extension() {
+        assert!(is_note_name("a.md"));
+        assert!(is_note_name("README.MD"));
+        assert!(!is_note_name(".md"));
+        assert!(!is_note_name("a.txt"));
+        assert!(!is_note_name("md"));
+    }
 
     #[test]
     fn nothing_is_due_without_an_edit() {

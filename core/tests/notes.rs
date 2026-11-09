@@ -5,7 +5,7 @@
 
 use std::fs;
 
-use tpt_vault_core::notes::{load_note, save_note};
+use tpt_vault_core::notes::{list_notes, load_note, save_note};
 use tpt_vault_core::{FsVault, KdfParams, VaultBackend};
 
 const TEST_KDF: KdfParams = KdfParams {
@@ -48,6 +48,28 @@ fn multibyte_text_survives_block_boundaries() {
     let text = "héllo wörld — 日本語 🙂 ".repeat(800);
     save_note(&v, "u.md", &text).unwrap();
     assert_eq!(load_note(&v, "u.md").unwrap(), text);
+}
+
+#[test]
+fn listing_returns_only_markdown_notes_recursively() {
+    let dir = tempfile::tempdir().unwrap();
+    let v = vault(&dir);
+    v.create_dir("work").unwrap();
+    v.create_dir("work/deep").unwrap();
+    save_note(&v, "root.md", "r").unwrap();
+    save_note(&v, "work/a.MD", "a").unwrap();
+    save_note(&v, "work/deep/b.md", "b").unwrap();
+    v.create_file("work/image.png").unwrap();
+    v.create_file("notes.txt").unwrap();
+
+    assert_eq!(
+        list_notes(&v, "").unwrap(),
+        vec!["root.md", "work/a.MD", "work/deep/b.md"]
+    );
+    assert_eq!(
+        list_notes(&v, "work/").unwrap(),
+        vec!["work/a.MD", "work/deep/b.md"]
+    );
 }
 
 #[test]
